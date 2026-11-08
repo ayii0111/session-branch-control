@@ -42,7 +42,7 @@ export type Graph = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'branch-tree': {
+    'session-branch-control': {
       nodes: Shaped<BranchNode[]>
       selected: string | null
       isOpen: boolean

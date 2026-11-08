@@ -1,5 +1,5 @@
 {
-  "name": "branch-tree",
+  "name": "session-branch-control",
   "version": "1.0.0",
   "description": "Side branches for concept questions (/q) and what-if reasoning (/wi) answered off the main thread, upgradeable into real child sessions, with a tree pane and a per-project session map",
   "author": { "name": "ayii" },

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# branch-tree 安裝（純 cc plugin）：從 custom-tools 市場安裝 branch-tree@custom-tools
+# session-branch-control 安裝（純 cc plugin）：從 custom-tools 市場安裝 session-branch-control@custom-tools
 # 可重跑：已安裝就更新。安裝後的程式碼在 cc 的 plugin 快取裡，不依賴本專案目錄。
 set -e
-PLUGIN="branch-tree"
+PLUGIN="session-branch-control"
 MARKET="custom-tools"
 ID="${PLUGIN}@${MARKET}"
 

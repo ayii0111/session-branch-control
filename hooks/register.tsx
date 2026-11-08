@@ -17,13 +17,13 @@ import {
   titleOfCurrent,
 } from './graph'
 
-const graphAtom = atom({ plugin: 'branch-tree', key: 'graph' } as const, { sessions: {}, pending: {} } as Graph, {
+const graphAtom = atom({ plugin: 'session-branch-control', key: 'graph' } as const, { sessions: {}, pending: {} } as Graph, {
   shape: 'graph-1',
 })
-const currentIdAtom = atom({ plugin: 'branch-tree', key: 'currentId' } as const, '')
-const liveTabsAtom = atom({ plugin: 'branch-tree', key: 'liveTabs' } as const, [] as string[])
-const mapCollapsedAtom = atom({ plugin: 'branch-tree', key: 'mapCollapsed' } as const, false)
-const mapSelectedAtom = atom({ plugin: 'branch-tree', key: 'mapSelected' } as const, null as string | null)
+const currentIdAtom = atom({ plugin: 'session-branch-control', key: 'currentId' } as const, '')
+const liveTabsAtom = atom({ plugin: 'session-branch-control', key: 'liveTabs' } as const, [] as string[])
+const mapCollapsedAtom = atom({ plugin: 'session-branch-control', key: 'mapCollapsed' } as const, false)
+const mapSelectedAtom = atom({ plugin: 'session-branch-control', key: 'mapSelected' } as const, null as string | null)
 
 /** change the shared map file and redraw from what was written */
 const mutate = async ($: Api, fn: (g: Graph) => void) => {
@@ -32,14 +32,14 @@ const mutate = async ($: Api, fn: (g: Graph) => void) => {
   return g
 }
 
-const PANE = 'branch-tree'
+const PANE = 'session-branch-control'
 const TITLE = '🌳 脈絡樹'
 
-const nodesAtom = atom({ plugin: 'branch-tree', key: 'nodes' } as const, [] as BranchNode[], {
+const nodesAtom = atom({ plugin: 'session-branch-control', key: 'nodes' } as const, [] as BranchNode[], {
   shape: 'nodes-1',
 })
-const selectedAtom = atom({ plugin: 'branch-tree', key: 'selected' } as const, null as string | null)
-const openAtom = atom({ plugin: 'branch-tree', key: 'isOpen' } as const, false)
+const selectedAtom = atom({ plugin: 'session-branch-control', key: 'selected' } as const, null as string | null)
+const openAtom = atom({ plugin: 'session-branch-control', key: 'isOpen' } as const, false)
 
 const storeKey = (sessionId: string) => `tree:${sessionId}`
 /** the person's last choice, kept across sessions: start collapsed or not */

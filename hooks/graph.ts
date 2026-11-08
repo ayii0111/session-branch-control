@@ -12,7 +12,7 @@ export const MAP_COLLAPSED_KEY = 'pref:mapCollapsed'
 async function graphPath($: Api) {
   const home = (await $.env.get('HOME')) ?? '/tmp'
   const cwd = await $.session.cwd()
-  return `${home}/.claude/branch-tree/${cwd.replace(/[^A-Za-z0-9]+/g, '-')}.json`
+  return `${home}/.claude/session-branch-control/${cwd.replace(/[^A-Za-z0-9]+/g, '-')}.json`
 }
 
 export async function readGraph($: Api): Promise<Graph> {

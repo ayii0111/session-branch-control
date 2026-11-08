@@ -1,9 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 const PANE = {
-  plugin: 'branch-tree',
+  plugin: 'session-branch-control',
   component: 'Pane',
-  requestId: 'branch-tree',
+  requestId: 'session-branch-control',
   surface: 'terminal',
   props: {
     title: '🌳 脈絡樹',
@@ -77,7 +77,7 @@ test('/t collapses to a mini bar above the prompt and expands again', async ($, 
     return { value: undefined }
   })
   on('ui.panes', () => ({
-    value: shown ? [{ id: 'branch-tree', title: '🌳 脈絡樹', isShown: true, isFocused: false, isPlaced: true }] : [],
+    value: shown ? [{ id: 'session-branch-control', title: '🌳 脈絡樹', isShown: true, isFocused: false, isPlaced: true }] : [],
   }))
   on('ui.toast', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -95,7 +95,7 @@ test('/t collapses to a mini bar above the prompt and expands again', async ($, 
   await $.command.run({ command: 'q', args: 'X 是什麼' })
 
   const band = {
-    plugin: 'branch-tree',
+    plugin: 'session-branch-control',
     component: 'AbovePrompt',
     surface: 'terminal',
     props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} },
