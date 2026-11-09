@@ -226,13 +226,20 @@ const openReader = async ($: Api, nodeId: string, jump: boolean) => {
 
 /** bring a transcript row to the viewport's top; a refusal is told, never thrown */
 const scrollTo = async ($: Api, requestId: string) => {
+  let why: string | undefined
   try {
-    const r = await $.ui.scroll({ to: { requestId }, block: 'start' })
-    if (r.deny) $.ui.toast(`沒辦法捲動：${r.deny}`)
+    why = (await $.ui.scroll({ to: { requestId }, block: 'start' })).deny
   } catch (err) {
-    $.ui.toast(`沒辦法捲動：${String((err as Error)?.message ?? err)}`)
+    why = String((err as Error)?.message ?? err)
   }
+  if (!why) return
+  // every refusal goes to the debug log; the person hears each kind once
+  $.ui.log(`scroll to ${requestId} refused: ${why}`, { to: 'debug' })
+  if (scrollDenied.has(why)) return
+  scrollDenied.add(why)
+  $.ui.toast(`閱讀區沒辦法捲動（${why}）`)
 }
+const scrollDenied = new Set<string>()
 
 /** back to the message that was at the top before the reader was jumped to */
 const goBack = async ($: Api) => {
@@ -610,8 +617,8 @@ export const register: Register = on => {
     const { Box, Text, Button, Markdown } = $.ui.resolve(e)
     const icon = (n: BranchNode) => (n.kind === 'q' ? '?' : '⑂')
     const label = `${icon(node)} ${node.kind === 'q' ? '追問' : '假設'}：${node.text}`
-    const fold = () => void foldReader($ as unknown as Api)
-    const back = () => void goBack($ as unknown as Api)
+    const fold = () => foldReader($ as unknown as Api)
+    const back = () => goBack($ as unknown as Api)
     const show = (id: string) => () => {
       void (async () => {
         await update($, selectedAtom, () => id)
@@ -622,7 +629,7 @@ export const register: Register = on => {
     if (!r.open) {
       return (
         <Box gap={1}>
-          <Button key="unfold" plain label="[▸ 展開]" onPress={() => void openReader($ as unknown as Api, node.id, true)} />
+          <Button key="unfold" plain label="[▸ 展開]" onPress={() => openReader($ as unknown as Api, node.id, true)} />
           <Text dimColor>📖</Text>
           <Text wrap="truncate-end">{label}</Text>
         </Box>
@@ -644,12 +651,12 @@ export const register: Register = on => {
         <Box gap={1}>
           <Button key="fold" plain label="[▴ 收合]" onPress={fold} />
           {r.back && <Button key="back" plain label="[↩ 回原處]" onPress={back} />}
-          <Button key="close" plain label="[✕ 關閉]" onPress={() => void closeReader($ as unknown as Api)} />
+          <Button key="close" plain label="[✕ 關閉]" onPress={() => closeReader($ as unknown as Api)} />
           <Text dimColor>📖 支線閱讀區 · /r 開合</Text>
         </Box>
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
           <Box flexWrap="wrap">
-            <Button key="crumb-main" plain label="● 主線" onPress={() => void (async () => {
+            <Button key="crumb-main" plain label="● 主線" onPress={() => (async () => {
               await update($, selectedAtom, () => null)
               await closeReader($ as unknown as Api)
             })()} />
@@ -679,7 +686,7 @@ export const register: Register = on => {
             <Button key="merge" label="併回主線" onPress={() => void mergeBack($ as unknown as Api, node.id)} />
             <Button key="up-here" label="⇪ 升級：原地" onPress={() => void upgradeNode($ as unknown as Api, node.id, 'here')} />
             <Button key="up-tab" label="⇪ 升級：新分頁" onPress={() => void upgradeNode($ as unknown as Api, node.id, 'tab')} />
-            <Button key="del" label="刪除" onPress={() => void removeNode($ as unknown as Api, node.id)} />
+            <Button key="del" label="刪除" onPress={() => removeNode($ as unknown as Api, node.id)} />
           </Box>
         </Box>
         <Box gap={1}>
@@ -730,7 +737,7 @@ export const register: Register = on => {
           <Text dimColor>  [展開樹 /t]</Text>
         </Button>
         {nodes.length > 0 && (
-          <Button key="reader" plain label={readerOpen ? '[📖 收合閱讀 /r]' : '[📖 閱讀 /r]'} onPress={() => void toggleReader($ as unknown as Api)} />
+          <Button key="reader" plain label={readerOpen ? '[📖 收合閱讀 /r]' : '[📖 閱讀 /r]'} onPress={() => toggleReader($ as unknown as Api)} />
         )}
       </Box>
     )
@@ -843,21 +850,21 @@ export const register: Register = on => {
 
     const reader = await read($, readerAtom)
     const readerOpen = reader.row !== null && reader.open
-    const goMain = () => {
-      void (async () => {
+    // press handlers that scroll return their promise: the engine lets a
+    // transcript row scroll only while the press is still being answered
+    const goMain = () =>
+      (async () => {
         await update($, selectedAtom, () => null)
         if (reader.row) await closeReader($ as unknown as Api)
       })()
-    }
     // the sidebar is the outline: a pick opens the branch in the full-width reader
-    const select = (id: string) => () => {
-      void (async () => {
+    const select = (id: string) => () =>
+      (async () => {
         await update($, selectedAtom, () => id)
         await openReader($ as unknown as Api, id, true)
       })()
-    }
     const readerButton = (key: string) => (
-      <Button key={key} label={readerOpen ? '📖 收合閱讀' : '📖 閱讀'} hotkey="r" onPress={() => void toggleReader($ as unknown as Api)} />
+      <Button key={key} label={readerOpen ? '📖 收合閱讀' : '📖 閱讀'} hotkey="r" onPress={() => toggleReader($ as unknown as Api)} />
     )
 
     const toggleMap = () => {
