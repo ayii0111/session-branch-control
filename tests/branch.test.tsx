@@ -15,14 +15,19 @@ const PANE = {
   },
 } as const
 
-test('/q opens a branch, its answer lands in the pane, merge writes a record into history', async ($, on) => {
+test('/q opens a branch, its answer lands in the full-width reader, merge writes a record into history', async ($, on) => {
   const clock = mock.clock(on)
   mock.store(on)
   const session = mock.session(on)
   const forks: string[] = []
+  const placed: string[] = []
 
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.place', (_, e) => {
+    placed.push(e.id)
+    return { value: { isPlaced: true, requestId: `req-${e.id}` } }
+  })
   on('ui.toast', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'sess-1' }))
@@ -50,17 +55,36 @@ test('/q opens a branch, its answer lands in the pane, merge writes a record int
   expect(forks[1]).toContain('CRDT 是什麼')
   expect(forks[1]).toContain('ANSWER-1')
 
-  const ui = await $.ui.mount(PANE)
-  expect((await ui.find({ type: 'Text', text: /若改用 OT/ }))?.text).toContain('若改用 OT')
+  // each /q places its own reader row at the transcript's end, no jump
+  expect(placed.length).toBe(2)
+  const row = placed[1]!
+  const reader = await $.ui.mount({
+    plugin: 'session-branch-control',
+    component: 'Placed',
+    requestId: `req-${row}`,
+    surface: 'terminal',
+    props: { id: row, plugin: 'session-branch-control' },
+  })
+  expect((await reader.find({ type: 'Text', text: /若改用 OT/ }))?.text).toContain('若改用 OT')
 
-  await ui.press({ key: 'merge' })
+  await reader.press({ key: 'merge' })
   const rows = session.appended()
   expect(rows.length).toBe(1)
   const text = JSON.stringify(rows[0])
   expect(text).toContain('side-branch')
   expect(text).toContain('ANSWER-1')
   expect(text).toContain('ANSWER-2')
-  await ui.unmount()
+
+  // the sidebar is only the outline now: no answer drawn there
+  const pane = await $.ui.mount(PANE)
+  expect(await pane.find({ type: 'Text', text: /ANSWER-2/ })).toBeUndefined()
+  // 📖 folds the open reader, a second press opens it again and jumps to it
+  await pane.press({ key: 'reader' })
+  expect(await reader.find({ type: 'Text', text: /ANSWER/ })).toBeUndefined()
+  await pane.press({ key: 'reader' })
+  expect((await reader.find({ type: 'Text', text: /若改用 OT/ }))?.text).toContain('若改用 OT')
+  await pane.unmount()
+  await reader.unmount()
 })
 
 test('/t collapses to a mini bar above the prompt and expands again', async ($, on) => {
@@ -82,6 +106,7 @@ test('/t collapses to a mini bar above the prompt and expands again', async ($, 
   on('ui.toast', () => ({ value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'sess-2' }))
+  on('ui.place', () => ({ value: { isPlaced: true, requestId: 'row' } }))
   on('session.turns', () => ({ value: 3 }))
   on('model.fork', () => ({
     value: {

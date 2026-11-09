@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { BranchKind, BranchNode, Graph } from '../types'
+import type { BranchKind, BranchNode, Graph, Reader } from '../types'
 import {
   type Api,
   MAP_COLLAPSED_KEY,
@@ -40,6 +40,8 @@ const nodesAtom = atom({ plugin: 'session-branch-control', key: 'nodes' } as con
 })
 const selectedAtom = atom({ plugin: 'session-branch-control', key: 'selected' } as const, null as string | null)
 const openAtom = atom({ plugin: 'session-branch-control', key: 'isOpen' } as const, false)
+const READER0: Reader = { row: null, req: null, node: null, open: false, back: null }
+const readerAtom = atom({ plugin: 'session-branch-control', key: 'reader' } as const, READER0)
 
 const storeKey = (sessionId: string) => `tree:${sessionId}`
 /** the person's last choice, kept across sessions: start collapsed or not */
@@ -104,7 +106,7 @@ const buildPrompt = (kind: BranchKind, text: string, chain: readonly BranchNode[
     .map(n => `${n.kind === 'q' ? '問' : '假設'}：${n.text}\n答：${n.answer}`)
     .join('\n\n')
   return [
-    '【旁支提問｜這次回答只會顯示在用戶的側欄，不會進入主線對話】',
+    '【旁支提問｜這次回答只會顯示在用戶的支線閱讀區，不會進入主線對話】',
     '規則：你在這裡沒有任何工具可用，請直接根據既有對話脈絡立刻回答，不需要長考。用繁體中文，精簡（約 150–400 字），可用 Markdown。',
     KIND_RULE[kind],
     history ? `這條支線先前的問答（請延續它）：\n${history}` : '',
@@ -160,6 +162,148 @@ const loadFor = async ($: Api) => {
   const fixed = nodes.map(n => (n.status === 'pending' ? { ...n, status: 'error' as const, answer: '（中斷：session 重啟時尚未回答）' } : n))
   await update($, nodesAtom, () => fixed)
   await update($, selectedAtom, () => null)
+  // placed rows do not survive a resume or /clear
+  await update($, readerAtom, () => READER0)
+  placedAtSeq = -1
+}
+
+// ---- reader: a full-width row placed in the transcript -----------------------
+
+/**
+ * What the transcript has on screen, learned from pass-through render hooks
+ * on its messages: `n` is the order a message was first drawn in.
+ */
+type Seen = { n: number; on: { first: number; last: number; of: number } | null | undefined }
+const seen = new Map<string, Seen>()
+let seq = 0
+/** `seq` when the reader row was placed: a row is reused while nothing new came after it */
+let placedAtSeq = -1
+
+const track = (requestId: string, on: Seen['on']) => {
+  const s = seen.get(requestId)
+  if (s) s.on = on
+  else seen.set(requestId, { n: ++seq, on })
+}
+
+/** the message at the viewport's top edge: the one cut at its top, else the earliest showing */
+const topVisible = () => {
+  let cut: [string, Seen] | undefined
+  let first: [string, Seen] | undefined
+  for (const entry of seen) {
+    const on = entry[1].on
+    if (!on) continue
+    if (on.first > 0 && (!cut || entry[1].n < cut[1].n)) cut = entry
+    if (!first || entry[1].n < first[1].n) first = entry
+  }
+  return (cut ?? first)?.[0] ?? null
+}
+
+/**
+ * Show `nodeId` in the reader row at the transcript's end, placing a new row
+ * when the conversation moved on since the last one. `jump`: remember where
+ * the person was reading and scroll the reader into view (only from their own
+ * press or command, where the engine lets a transcript row scroll).
+ */
+const openReader = async ($: Api, nodeId: string, jump: boolean) => {
+  const r = await read($, readerAtom)
+  const reuse = r.row !== null && r.req !== null && placedAtSeq === seq
+  const back = jump ? (reuse && r.open && r.back ? r.back : topVisible()) : r.back
+  if (reuse) {
+    await update($, readerAtom, v => ({ ...v, node: nodeId, open: true, back }))
+  } else {
+    const row = `reader-${newId()}`
+    await update($, readerAtom, () => ({ row, req: null, node: nodeId, open: true, back }))
+    const p = await $.ui.place({ id: row })
+    placedAtSeq = seq
+    const req = p.requestId ?? null
+    await update($, readerAtom, v => (v.row === row ? { ...v, req } : v))
+  }
+  if (jump) {
+    const req = (await read($, readerAtom)).req
+    if (req) await scrollTo($, req)
+  }
+}
+
+/** bring a transcript row to the viewport's top; a refusal is told, never thrown */
+const scrollTo = async ($: Api, requestId: string) => {
+  try {
+    const r = await $.ui.scroll({ to: { requestId }, block: 'start' })
+    if (r.deny) $.ui.toast(`沒辦法捲動：${r.deny}`)
+  } catch (err) {
+    $.ui.toast(`沒辦法捲動：${String((err as Error)?.message ?? err)}`)
+  }
+}
+
+/** back to the message that was at the top before the reader was jumped to */
+const goBack = async ($: Api) => {
+  const back = (await read($, readerAtom)).back
+  if (back) await scrollTo($, back)
+}
+
+const foldReader = async ($: Api) => {
+  await update($, readerAtom, v => ({ ...v, open: false }))
+  await goBack($)
+}
+
+const closeReader = async ($: Api) => {
+  await goBack($)
+  await update($, readerAtom, v => ({ ...READER0, back: v.back }))
+}
+
+/** /r and the 📖 buttons: fold an open reader, else open it on the selected (or latest) branch */
+const toggleReader = async ($: Api) => {
+  const r = await read($, readerAtom)
+  if (r.row && r.open) {
+    await foldReader($)
+    return false
+  }
+  const nodes = await read($, nodesAtom)
+  const sel = await read($, selectedAtom)
+  const target = (sel && nodes.some(n => n.id === sel) ? sel : null) ?? (r.node && nodes.some(n => n.id === r.node) ? r.node : null) ?? nodes.at(-1)?.id
+  if (!target) return null
+  await update($, selectedAtom, () => target)
+  await openReader($, target, true)
+  return true
+}
+
+const mergeBack = async ($: Api, id: string) => {
+  const chain = chainOf(await read($, nodesAtom), id).filter(n => n.status === 'done')
+  if (chain.length === 0) return
+  try {
+    // a hidden user row at the end: the main agent reads it next turn,
+    // no turn is started and nothing already sent changes (cache kept)
+    await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: toRecord(chain, 'merge') }] } })
+    await update($, nodesAtom, list => list.map(n => (chain.some(c => c.id === n.id) ? { ...n, merged: true } : n)))
+    await persist($)
+    $.ui.toast(`已把 ${chain.length} 段支線問答併回主線，主線下一輪就會讀到`)
+  } catch (err) {
+    $.ui.toast(`併回失敗：${String((err as Error)?.message ?? err)}`)
+  }
+}
+
+const upgradeNode = async ($: Api, id: string, where: 'here' | 'tab') => {
+  const spec = await upgradeSpec($, id)
+  if (!spec) {
+    $.ui.toast('這條支線還沒有完成的回答，不能升級')
+    return
+  }
+  if (where === 'here') await forkHere($, spec)
+  else await forkToTab($, await $.session.id(), spec)
+}
+
+const removeNode = async ($: Api, id: string) => {
+  const all = await read($, nodesAtom)
+  const gone = descendantsOf(all, id)
+  const target = all.find(n => n.id === id)
+  await update($, nodesAtom, list => list.filter(n => !gone.has(n.id)))
+  await update($, selectedAtom, s => (s && gone.has(s) ? (target?.parentId ?? null) : s))
+  const r = await read($, readerAtom)
+  if (r.node && gone.has(r.node)) {
+    const parent = target?.parentId
+    if (parent) await update($, readerAtom, v => ({ ...v, node: parent }))
+    else await closeReader($)
+  }
+  await persist($)
 }
 
 const ask = async ($: Api, kind: BranchKind, text: string) => {
@@ -180,8 +324,11 @@ const ask = async ($: Api, kind: BranchKind, text: string) => {
   await update($, nodesAtom, list => [...list, node])
   await update($, selectedAtom, () => node.id)
   await persist($)
-  // respect a collapsed tree: the mini bar above the prompt shows progress
-  if ((await $.store.get(COLLAPSED_KEY)) !== true) await openPane($)
+  // the answer shows in a full-width reader row at the transcript's end,
+  // where the person already is: no jump, nothing to come back to
+  await update($, readerAtom, v => ({ ...v, back: null }))
+  placedAtSeq = -1 // a new row under the command's own echo
+  await openReader($, node.id, false)
 
   // detach from the command's dispatch so a long answer is not cut off
   $.clock.after(0, () => {
@@ -401,6 +548,7 @@ export const register: Register = on => {
     await $.command.register({ name: 'wi', description: '開支線：假設推演 what-if（答案只進側欄，不進主線）', argumentHint: '[假設情境]' })
     await $.command.register({ name: 'tree', description: '打開脈絡樹面板並聚焦' })
     await $.command.register({ name: 't', description: '快速開合脈絡樹面板（對話進行中也能用）', immediate: true })
+    await $.command.register({ name: 'r', description: '開合支線閱讀區（全寬顯示選中支線的問答；收合時捲回原處）', immediate: true })
     await $.command.register({ name: 'up', description: '把選中的輕支線升級成重支線，原地切過去' })
     await $.command.register({ name: 'up-tab', description: '把選中的輕支線升級成重支線，開在新分頁' })
     await $.command.register({ name: 'sub', description: '從目前 session 分出子 session，開在新分頁', argumentHint: '[標題]' })
@@ -435,6 +583,119 @@ export const register: Register = on => {
     return { text: isUp ? '🌳 已展開' : '🌳 已收合（輸入框上方保留一行迷你列）' }
   })
 
+  on('command.run', { command: 'r' }, async $ => {
+    const opened = await toggleReader($)
+    if (opened === null) return { text: '還沒有輕支線可以讀。先用 /q 或 /wi 開一條' }
+    return { text: opened ? '📖 閱讀區已打開' : '📖 閱讀區已收合，捲回原處' }
+  })
+
+  // learn what the transcript has on screen, so the reader can come back to it
+  on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
+    track(e.requestId, e.props.onScreen)
+    return next(e)
+  })
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    track(e.requestId, e.props.onScreen)
+    return next(e)
+  })
+
+  // the reader row: full width, as tall as the answer
+  on('ui.render', { component: 'Placed' }, async ($, e, next) => {
+    if (e.props.plugin !== 'session-branch-control') return next(e)
+    const r = await read($, readerAtom)
+    if (e.props.id !== r.row) return next(e)
+    const nodes = await read($, nodesAtom)
+    const node = r.node ? nodes.find(n => n.id === r.node) : undefined
+    if (!node) return next(e)
+    const { Box, Text, Button, Markdown } = $.ui.resolve(e)
+    const icon = (n: BranchNode) => (n.kind === 'q' ? '?' : '⑂')
+    const label = `${icon(node)} ${node.kind === 'q' ? '追問' : '假設'}：${node.text}`
+    const fold = () => void foldReader($ as unknown as Api)
+    const back = () => void goBack($ as unknown as Api)
+    const show = (id: string) => () => {
+      void (async () => {
+        await update($, selectedAtom, () => id)
+        await update($, readerAtom, v => ({ ...v, node: id, open: true }))
+      })()
+    }
+
+    if (!r.open) {
+      return (
+        <Box gap={1}>
+          <Button key="unfold" plain label="[▸ 展開]" onPress={() => void openReader($ as unknown as Api, node.id, true)} />
+          <Text dimColor>📖</Text>
+          <Text wrap="truncate-end">{label}</Text>
+        </Box>
+      )
+    }
+
+    const chain = chainOf(nodes, node.id)
+    const kids = nodes.filter(n => n.parentId === node.id)
+    const vis = e.props.onScreen
+    // the row's end is cut off by the viewport's bottom: float the controls
+    // on the second-to-last row showing (the last holds the engine's own button)
+    const floatAt = vis && vis.last >= 2 && vis.last < vis.of - 1 ? vis.last - 1 : null
+    const status =
+      node.status === 'pending' ? ' · 回答中…' : node.status === 'error' ? ' · ✗ 失敗' : ''
+    const marks = `${node.merged ? ' · ⤴ 已併回主線' : ''}${node.upgradedTo ? ' · ⇪ 已升級成重支線' : ''}`
+
+    return (
+      <Box flexDirection="column">
+        <Box gap={1}>
+          <Button key="fold" plain label="[▴ 收合]" onPress={fold} />
+          {r.back && <Button key="back" plain label="[↩ 回原處]" onPress={back} />}
+          <Button key="close" plain label="[✕ 關閉]" onPress={() => void closeReader($ as unknown as Api)} />
+          <Text dimColor>📖 支線閱讀區 · /r 開合</Text>
+        </Box>
+        <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
+          <Box flexWrap="wrap">
+            <Button key="crumb-main" plain label="● 主線" onPress={() => void (async () => {
+              await update($, selectedAtom, () => null)
+              await closeReader($ as unknown as Api)
+            })()} />
+            {chain.slice(0, -1).map(n => (
+              <Box key={`c-${n.id}`}>
+                <Text dimColor> › </Text>
+                <Button key={`crumb-${n.id}`} plain label={`${icon(n)} ${n.text.slice(0, 24)}`} onPress={show(n.id)} />
+              </Box>
+            ))}
+          </Box>
+          <Text bold wrap="wrap">{label}</Text>
+          <Text dimColor wrap="wrap">
+            {`從主線第 ${node.turn} 輪分出 · 新的 /q、/wi 會接在這個節點底下${status}${marks}`}
+          </Text>
+          <Box marginTop={1} flexDirection="column">
+            {node.status === 'pending' ? <Text dimColor>回答中…</Text> : <Markdown text={node.answer || '（空）'} />}
+          </Box>
+          {kids.length > 0 && (
+            <Box flexWrap="wrap" gap={1} marginTop={1}>
+              <Text dimColor>接續：</Text>
+              {kids.map(k => (
+                <Button key={`kid-${k.id}`} plain label={`${icon(k)} ${k.text.slice(0, 24)}`} onPress={show(k.id)} />
+              ))}
+            </Box>
+          )}
+          <Box flexWrap="wrap" gap={1} marginTop={1}>
+            <Button key="merge" label="併回主線" onPress={() => void mergeBack($ as unknown as Api, node.id)} />
+            <Button key="up-here" label="⇪ 升級：原地" onPress={() => void upgradeNode($ as unknown as Api, node.id, 'here')} />
+            <Button key="up-tab" label="⇪ 升級：新分頁" onPress={() => void upgradeNode($ as unknown as Api, node.id, 'tab')} />
+            <Button key="del" label="刪除" onPress={() => void removeNode($ as unknown as Api, node.id)} />
+          </Box>
+        </Box>
+        <Box gap={1}>
+          <Button key="fold2" plain label="[▴ 收合]" onPress={fold} />
+          {r.back && <Button key="back2" plain label="[↩ 回原處]" onPress={back} />}
+        </Box>
+        {floatAt !== null && (
+          <Box position="absolute" top={floatAt} right={0} gap={1}>
+            {r.back && <Button key="back-float" plain label="[↩ 回原處]" onPress={back} />}
+            <Button key="fold-float" plain label="[▴ 收合]" onPress={fold} />
+          </Box>
+        )}
+      </Box>
+    )
+  })
+
   on('command.run', { command: 'map' }, async $ => {
     const now = !(await read($, mapCollapsedAtom))
     await update($, mapCollapsedAtom, () => now)
@@ -456,16 +717,21 @@ export const register: Register = on => {
     const pending = nodes.filter(n => n.status === 'pending').length
     const { Box, Text, Button } = $.ui.resolve(e)
     const where = current ? `${current.kind === 'q' ? '?' : '⑂'} ${current.text}` : (g.sessions[cur]?.title ?? '● 主線')
+    const reader = await read($, readerAtom)
+    const readerOpen = reader.row !== null && reader.open
     return (
-      <Box>
+      <Box gap={1}>
         <Button key="expand" onPress={() => void openPane($ as unknown as Api)}>
           <Text>🌳 </Text>
           <Text dimColor>
             {`${fam >= 2 ? `${fam} 個 session · ` : ''}${nodes.length} 條支線${pending ? ` · ${pending} 回答中…` : ''} · 目前：`}
           </Text>
-          <Text wrap="truncate-end">{where.slice(0, Math.max(10, e.props.bodyColumns - 50))}</Text>
-          <Text dimColor>  [展開 /t]</Text>
+          <Text wrap="truncate-end">{where.slice(0, Math.max(10, e.props.bodyColumns - 66))}</Text>
+          <Text dimColor>  [展開樹 /t]</Text>
         </Button>
+        {nodes.length > 0 && (
+          <Button key="reader" plain label={readerOpen ? '[📖 收合閱讀 /r]' : '[📖 閱讀 /r]'} onPress={() => void toggleReader($ as unknown as Api)} />
+        )}
       </Box>
     )
   })
@@ -498,14 +764,14 @@ export const register: Register = on => {
     const text = e.args.trim()
     if (!text) return { text: '用法：/q <想追問的概念>' }
     await ask($, 'q', text)
-    return { text: '支線已開，答案會出現在 🌳 脈絡樹面板' }
+    return { text: '支線已開，答案會出現在下方的 📖 閱讀區' }
   })
 
   on('command.run', { command: 'wi' }, async ($, e) => {
     const text = e.args.trim()
     if (!text) return { text: '用法：/wi <假設情境>' }
     await ask($, 'wi', text)
-    return { text: '支線已開，答案會出現在 🌳 脈絡樹面板' }
+    return { text: '支線已開，答案會出現在下方的 📖 閱讀區' }
   })
 
   on('command.run', { command: 'tree' }, async $ => {
@@ -558,7 +824,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button, Markdown } = $.ui.resolve(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
     const nodes = await read($, nodesAtom)
     const sel = await read($, selectedAtom)
     const g = await read($, graphAtom)
@@ -575,50 +841,24 @@ export const register: Register = on => {
     const picked = mapSel ? g.sessions[mapSel] : undefined
     const curTitle = g.sessions[cur]?.title
 
-    const goMain = () => update($, selectedAtom, () => null)
-    const select = (id: string) => () => update($, selectedAtom, () => id)
-
-    const mergeBack = (id: string) => () => {
+    const reader = await read($, readerAtom)
+    const readerOpen = reader.row !== null && reader.open
+    const goMain = () => {
       void (async () => {
-        const chain = chainOf(await read($, nodesAtom), id).filter(n => n.status === 'done')
-        if (chain.length === 0) return
-        try {
-          // a hidden user row at the end: the main agent reads it next turn,
-          // no turn is started and nothing already sent changes (cache kept)
-          await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: toRecord(chain, 'merge') }] } })
-          await update($, nodesAtom, list => list.map(n => (chain.some(c => c.id === n.id) ? { ...n, merged: true } : n)))
-          const sid = await $.session.id()
-          await $.store.set(storeKey(sid), await read($, nodesAtom))
-          $.ui.toast(`已把 ${chain.length} 段支線問答併回主線，主線下一輪就會讀到`)
-        } catch (err) {
-          $.ui.toast(`併回失敗：${String((err as Error)?.message ?? err)}`)
-        }
+        await update($, selectedAtom, () => null)
+        if (reader.row) await closeReader($ as unknown as Api)
       })()
     }
-
-    const upgrade = (id: string, where: 'here' | 'tab') => () => {
+    // the sidebar is the outline: a pick opens the branch in the full-width reader
+    const select = (id: string) => () => {
       void (async () => {
-        const spec = await upgradeSpec(($ as unknown as Api), id)
-        if (!spec) {
-          $.ui.toast('這條支線還沒有完成的回答，不能升級')
-          return
-        }
-        if (where === 'here') await forkHere(($ as unknown as Api), spec)
-        else await forkToTab(($ as unknown as Api), await $.session.id(), spec)
+        await update($, selectedAtom, () => id)
+        await openReader($ as unknown as Api, id, true)
       })()
     }
-
-    const remove = (id: string) => () => {
-      void (async () => {
-        const all = await read($, nodesAtom)
-        const gone = descendantsOf(all, id)
-        const target = all.find(n => n.id === id)
-        await update($, nodesAtom, list => list.filter(n => !gone.has(n.id)))
-        await update($, selectedAtom, s => (s && gone.has(s) ? (target?.parentId ?? null) : s))
-        const sid = await $.session.id()
-        await $.store.set(storeKey(sid), await read($, nodesAtom))
-      })()
-    }
+    const readerButton = (key: string) => (
+      <Button key={key} label={readerOpen ? '📖 收合閱讀' : '📖 閱讀'} hotkey="r" onPress={() => void toggleReader($ as unknown as Api)} />
+    )
 
     const toggleMap = () => {
       void (async () => {
@@ -641,7 +881,10 @@ export const register: Register = on => {
                 <Text bold>{`🗺 Session 地圖（${famRows.length}）`}</Text>
                 <Text dimColor>{mapCollapsed ? '  [+ 展開]' : '  [− 收合]'}</Text>
               </Button>
-              <Button key="collapse" label="⇥ 收合" hotkey="x" onPress={() => void closePane(($ as unknown as Api))} />
+              <Box gap={1}>
+                {rows.length > 0 && readerButton('reader')}
+                <Button key="collapse" label="⇥ 收合" hotkey="x" onPress={() => void closePane($ as unknown as Api)} />
+              </Box>
             </Box>
             {!mapCollapsed &&
               famRows.map(({ s, prefix }) => (
@@ -688,7 +931,12 @@ export const register: Register = on => {
             <Text bold={!sel} inverse={!sel}>{`● ${hasMap && curTitle ? curTitle.slice(0, Math.max(8, width - 24)) : '主線'}`}</Text>
             <Text dimColor>{sel ? '  （點此回主線）' : '  ← 你在這裡'}</Text>
           </Button>
-          {!hasMap && <Button key="collapse" label="⇥ 收合" hotkey="x" onPress={() => void closePane(($ as unknown as Api))} />}
+          {!hasMap && (
+            <Box gap={1}>
+              {rows.length > 0 && readerButton('reader')}
+              <Button key="collapse" label="⇥ 收合" hotkey="x" onPress={() => void closePane($ as unknown as Api)} />
+            </Box>
+          )}
         </Box>
         {rows.length === 0 && (
           <Text dimColor wrap="wrap">
@@ -710,24 +958,11 @@ export const register: Register = on => {
           </Button>
         ))}
         {current && (
-          <Box flexDirection="column" marginTop={1} borderStyle="single" borderDimColor paddingX={1}>
-            <Text bold wrap="wrap">
-              {current.kind === 'q' ? '? 追問：' : '⑂ 假設：'}
-              {current.text}
-            </Text>
-            <Text dimColor>
-              {`從主線第 ${current.turn} 輪分出 · 新的 /q、/wi 會接在這個節點底下${current.upgradedTo ? ' · 已升級成重支線' : ''}`}
-            </Text>
-            {current.status === 'pending' && <Text dimColor>回答中…</Text>}
-            {current.status !== 'pending' && <Markdown text={current.answer || '（空）'} />}
-            <Box flexWrap="wrap" gap={1} marginTop={1}>
-              <Button key="merge" label="併回主線" onPress={mergeBack(current.id)} />
-              <Button key="up-here" label="⇪ 升級：原地" onPress={upgrade(current.id, 'here')} />
-              <Button key="up-tab" label="⇪ 升級：新分頁" onPress={upgrade(current.id, 'tab')} />
-              <Button key="main2" label="回主線" onPress={goMain} />
-              <Button key="del" label="刪除" onPress={remove(current.id)} />
-            </Box>
-          </Box>
+          <Text dimColor wrap="wrap">
+            {readerOpen && reader.node === current.id
+              ? '📖 內容在對話下方的閱讀區（/r 收合並捲回原處）'
+              : '📖 點節點或按「閱讀」在對話下方全寬閱讀'}
+          </Text>
         )}
       </Box>
     )

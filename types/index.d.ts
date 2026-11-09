@@ -40,6 +40,20 @@ export type Graph = {
   inplace?: { parentId: string; title: string; record?: string; fromBranch?: string; fromTurn: number; at: number }
 }
 
+/** the full-width reading row placed in the transcript (`$.ui.place`) */
+export type Reader = {
+  /** the placed row's id; null = no reader row */
+  row: string | null
+  /** the placed row's requestId, what `$.ui.scroll` takes */
+  req: string | null
+  /** the branch node it shows */
+  node: string | null
+  /** expanded (true) or folded to one line */
+  open: boolean
+  /** requestId of the transcript message that was at the top before jumping */
+  back: string | null
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'session-branch-control': {
@@ -51,6 +65,7 @@ declare module 'claude-code' {
       liveTabs: string[]
       mapCollapsed: boolean
       mapSelected: string | null
+      reader: Reader
     }
   }
 }

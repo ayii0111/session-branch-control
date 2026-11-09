@@ -1,6 +1,6 @@
 # session-branch-control
 
-Claude Code 的對話分枝管理：主線之外，用 `/q`（概念追問）、`/wi`（假設推演）開**輕支線**，答案只進側欄、不污染主線；
+Claude Code 的對話分枝管理：主線之外，用 `/q`（概念追問）、`/wi`（假設推演）開**輕支線**，答案只顯示在全寬的閱讀區、不污染主線（側欄只看樹狀架構）；
 支線可**併回主線**，或**升級成重支線**（真正的子 session，原地或開在新的 Orca 分頁）；
 每個 session 都看得到同一張 **Session 地圖**，可以一鍵原地切換或用分頁開啟任一分枝。
 
@@ -43,6 +43,7 @@ git clone https://github.com/ayii0111/session-branch-control.git && cd session-b
 | 功能 | 用到的 cc mod API |
 |---|---|
 | 輕支線問答 | `$.model.fork`：帶著主線完整脈絡、不用工具、答案不寫回主線，並沿用主線的 prompt cache |
+| 支線閱讀區 | `$.ui.place` 在對話尾端放一列全寬區塊；`UserMessage`／`AssistantMessage` 的 render hook 記下畫面上緣是哪則訊息，`$.ui.scroll({ to: { requestId } })` 跳去／捲回 |
 | 併回主線、升級時寫入紀錄 | `$.session.append`：在歷史最後面加一筆隱藏的 user 訊息，不觸發新的一輪 |
 | 原地切換、原地分出 | `$.command.run` 觸發內建 `/resume`、`/branch`（要從按鈕或計時器呼叫，不能在指令 hook 裡直接呼叫） |
 | 新分頁 | `orca terminal create` 執行 `claude --resume <id> [--fork-session --session-id <uuid>]` |
