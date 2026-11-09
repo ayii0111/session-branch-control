@@ -940,9 +940,13 @@ export const register: Register = on => {
         if (reader.row) await closeReader($ as unknown as Api)
       })()
     // the sidebar is the outline: a pick opens the branch in the full-width reader
+    // ...and folds the sidebar away (the person's open/closed preference kept),
+    // first, so the reader is scrolled to in the transcript's final width
     const select = (id: string) => () =>
       (async () => {
         await update($, selectedAtom, () => id)
+        await $.ui.close({ id: PANE })
+        await update($, openAtom, () => false)
         await openReader($ as unknown as Api, id, true)
       })()
     const readerButton = (key: string) => (
