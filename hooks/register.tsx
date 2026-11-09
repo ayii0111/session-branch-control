@@ -66,7 +66,39 @@ const togglePane = async ($: Api) => {
   return !isUp
 }
 
-const newId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
+/** terminal cells a string takes: wide (CJK, full-width, emoji) count two */
+const charCells = (cp: number) =>
+  (cp >= 0x1100 && cp <= 0x115f) ||
+  (cp >= 0x2e80 && cp <= 0xa4cf) ||
+  (cp >= 0xac00 && cp <= 0xd7a3) ||
+  (cp >= 0xf900 && cp <= 0xfaff) ||
+  (cp >= 0xfe30 && cp <= 0xfe4f) ||
+  (cp >= 0xff00 && cp <= 0xff60) ||
+  (cp >= 0xffe0 && cp <= 0xffe6) ||
+  (cp >= 0x1f300 && cp <= 0x1faff) ||
+  (cp >= 0x20000 && cp <= 0x3fffd)
+    ? 2
+    : 1
+const cells = (s: string) => {
+  let w = 0
+  for (const ch of s) w += charCells(ch.codePointAt(0) ?? 0)
+  return w
+}
+/** cut to at most `max` cells, ending in … when cut */
+const cut = (s: string, max: number) => {
+  if (cells(s) <= max) return s
+  let w = 0
+  let out = ''
+  for (const ch of s) {
+    const c = charCells(ch.codePointAt(0) ?? 0)
+    if (w + c > max - 1) break
+    out += ch
+    w += c
+  }
+  return `${out}…`
+}
+
+const newId = () =>`${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
 
 /** root → node, inclusive */
 const chainOf = (nodes: readonly BranchNode[], id: string | null): BranchNode[] => {
@@ -334,22 +366,71 @@ const ask = async ($: Api, kind: BranchKind, text: string) => {
   // the answer shows in a full-width reader row at the transcript's end,
   // where the person already is: no jump, nothing to come back to
   await update($, readerAtom, v => ({ ...v, back: null }))
-  placedAtSeq = -1 // a new row under the command's own echo
-  await openReader($, node.id, false)
 
-  // detach from the command's dispatch so a long answer is not cut off
+  // detach from the command's dispatch: the reader row then lands under the
+  // command's own echo (placed during the hook it would stand above it),
+  // and a long answer is not cut off
   $.clock.after(0, () => {
     void (async () => {
-      const r = await $.model.fork({ prompt: buildPrompt(kind, text, chain) })
+      placedAtSeq = -1
+      await openReader($, node.id, false)
+      const prompt = buildPrompt(kind, text, chain)
+      let r = await $.model.fork({ prompt })
+      if (!r.isAnswered && r.reason === 'nothing-to-fork') {
+        // this process has not sent the main thread yet (just resumed or
+        // switched in place): answer from the saved transcript instead
+        r = await answerFromTranscript($, prompt)
+      }
       const patch: Partial<BranchNode> = r.isAnswered
         ? { status: 'done', answer: r.text }
-        : { status: 'error', answer: `（沒有回答：${r.reason}）` }
+        : { status: 'error', answer: `（沒有回答：${reasonText(r)}）` }
       await update($, nodesAtom, list => list.map(n => (n.id === node.id ? { ...n, ...patch } : n)))
       await persist($)
       if (r.isAnswered) $.ui.toast(`支線回答好了：${text.slice(0, 20)}`)
     })()
   })
 }
+
+/** the tail of the main thread, as plain text, at most `limit` characters */
+const TRANSCRIPT_LIMIT = 60_000
+const transcriptText = async ($: Api) => {
+  const msgs = await $.session.messages()
+  const parts: string[] = []
+  let size = 0
+  for (let i = msgs.length - 1; i >= 0 && size < TRANSCRIPT_LIMIT; i--) {
+    const m = msgs[i]!
+    const tools = m.toolUses.map(t => `[工具 ${t.tool}]`).join(' ')
+    const body = [m.text.trim(), tools].filter(Boolean).join('\n')
+    if (!body) continue
+    const piece = `${m.role === 'user' ? '【用戶】' : '【助理】'}\n${body}`
+    parts.unshift(piece.length > TRANSCRIPT_LIMIT - size ? piece.slice(-(TRANSCRIPT_LIMIT - size)) : piece)
+    size += piece.length
+  }
+  return parts.join('\n\n')
+}
+
+const answerFromTranscript = async ($: Api, prompt: string) => {
+  const history = await transcriptText($)
+  if (!history) return { isAnswered: false as const, reason: 'nothing-to-fork' as const }
+  return $.model.complete({
+    model: await $.session.model(),
+    system: '你在協助用戶理解他與 AI 助理的一段對話。下面先給對話紀錄（可能只有後段），再給用戶的旁支提問。',
+    prompt: [
+      { text: `<對話紀錄>\n${history}\n</對話紀錄>` },
+      { text: prompt },
+    ],
+    maxTokens: 4096,
+  })
+}
+
+const reasonText = (r: { reason: string; status?: number | null }) =>
+  r.reason === 'nothing-to-fork'
+    ? '主線還沒有對話內容可以參考'
+    : r.reason === 'aborted'
+      ? '被中斷了'
+      : r.reason === 'empty-reply'
+        ? '模型沒有回任何文字'
+        : `${r.reason}${r.status ? ` ${r.status}` : ''}`
 
 // ---- session map (B layer) ----------------------------------------------
 
@@ -726,19 +807,20 @@ export const register: Register = on => {
     const where = current ? `${current.kind === 'q' ? '?' : '⑂'} ${current.text}` : (g.sessions[cur]?.title ?? '● 主線')
     const reader = await read($, readerAtom)
     const readerOpen = reader.row !== null && reader.open
+    const info = `${fam >= 2 ? `${fam} 個 session · ` : ''}${nodes.length} 條支線${pending ? ` · ${pending} 回答中…` : ''} · 目前：`
+    const treeLabel = '  [展開樹 /t]'
+    const readerLabel = readerOpen ? '[📖 收合閱讀 /r]' : '[📖 閱讀 /r]'
+    // one row: size the free text by display width (CJK takes two cells)
+    const room = e.props.bodyColumns - cells('🌳 ') - cells(info) - cells(treeLabel) - (nodes.length > 0 ? cells(readerLabel) + 1 : 0) - 1
     return (
       <Box gap={1}>
         <Button key="expand" onPress={() => void openPane($ as unknown as Api)}>
           <Text>🌳 </Text>
-          <Text dimColor>
-            {`${fam >= 2 ? `${fam} 個 session · ` : ''}${nodes.length} 條支線${pending ? ` · ${pending} 回答中…` : ''} · 目前：`}
-          </Text>
-          <Text wrap="truncate-end">{where.slice(0, Math.max(10, e.props.bodyColumns - 66))}</Text>
-          <Text dimColor>  [展開樹 /t]</Text>
+          <Text dimColor>{info}</Text>
+          <Text>{cut(where, Math.max(6, room))}</Text>
+          <Text dimColor>{treeLabel}</Text>
         </Button>
-        {nodes.length > 0 && (
-          <Button key="reader" plain label={readerOpen ? '[📖 收合閱讀 /r]' : '[📖 閱讀 /r]'} onPress={() => toggleReader($ as unknown as Api)} />
-        )}
+        {nodes.length > 0 && <Button key="reader" plain label={readerLabel} onPress={() => toggleReader($ as unknown as Api)} />}
       </Box>
     )
   })
@@ -898,7 +980,7 @@ export const register: Register = on => {
                 <Button key={`s-${s.id}`} onPress={() => update($, mapSelectedAtom, v => (v === s.id ? null : s.id))}>
                   <Text dimColor>{prefix}</Text>
                   <Text bold={s.id === cur} inverse={s.id === mapSel} wrap="truncate-end">
-                    {`${s.parentId ? '⑂' : '●'} ${s.title}`.slice(0, Math.max(12, width - prefix.length - 14))}
+                    {cut(`${s.parentId ? '⑂' : '●'} ${s.title}`, Math.max(12, width - cells(prefix) - 14))}
                   </Text>
                   <Text dimColor>
                     {`${s.fromTurn !== undefined ? ` #${s.fromTurn}` : ''}${s.tab && live.includes(s.tab) && s.id !== cur ? ' ▣' : ''}`}
@@ -935,7 +1017,7 @@ export const register: Register = on => {
         )}
         <Box justifyContent="space-between">
           <Button key="main" onPress={goMain}>
-            <Text bold={!sel} inverse={!sel}>{`● ${hasMap && curTitle ? curTitle.slice(0, Math.max(8, width - 24)) : '主線'}`}</Text>
+            <Text bold={!sel} inverse={!sel}>{`● ${hasMap && curTitle ? cut(curTitle, Math.max(8, width - 24)) : '主線'}`}</Text>
             <Text dimColor>{sel ? '  （點此回主線）' : '  ← 你在這裡'}</Text>
           </Button>
           {!hasMap && (
@@ -959,7 +1041,7 @@ export const register: Register = on => {
               dimColor={!onPath.has(node.id) && node.status === 'done'}
               wrap="truncate-end"
             >
-              {`${icon(node)} ${node.text}`.slice(0, width)}
+              {cut(`${icon(node)} ${node.text}`, Math.max(8, width - cells(prefix) - cells(` #${node.turn}${mark(node)}`)))}
             </Text>
             <Text dimColor>{` #${node.turn}${mark(node)}`}</Text>
           </Button>

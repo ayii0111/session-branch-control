@@ -140,3 +140,45 @@ test('/t collapses to a mini bar above the prompt and expands again', async ($, 
   const r3 = await $.command.run({ command: 't', args: '' })
   expect(r3.text).toContain('已展開')
 })
+
+test('/q right after a resume (nothing to fork) answers from the saved transcript', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  const completes: string[] = []
+  const toasts: string[] = []
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.place', (_, e) => ({ value: { isPlaced: true, requestId: `req-${e.id}` } }))
+  on('ui.toast', (_, e) => {
+    toasts.push(String(e.text))
+    return { value: undefined }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'sess-4' }))
+  on('session.turns', () => ({ value: 3 }))
+  on('session.model', () => ({ value: 'opus' }))
+  on('session.messages', () => ({
+    value: [
+      { role: 'user', text: '幫我看投標須知', toolUses: [] },
+      { role: 'assistant', text: '還缺的資料：規格文件', toolUses: [] },
+    ],
+  }))
+  on('model.fork', () => ({ value: { isAnswered: false, reason: 'nothing-to-fork' } }))
+  on('model.complete', (_, e) => {
+    completes.push(JSON.stringify(e))
+    return {
+      value: {
+        isAnswered: true,
+        text: 'FALLBACK',
+        usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      },
+    }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'q', args: '作品要做到什麼程度' })
+  await clock.advance(10)
+  expect(completes.length).toBe(1)
+  expect(completes[0]).toContain('投標須知')
+  expect(completes[0]).toContain('作品要做到什麼程度')
+  expect(toasts.some(t => t.includes('支線回答好了'))).toBe(true)
+})
