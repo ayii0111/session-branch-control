@@ -646,7 +646,11 @@ export const register: Register = on => {
     await update($, mapCollapsedAtom, () => false)
     if ((await $.store.get(MAP_COLLAPSED_KEY)) === true) await update($, mapCollapsedAtom, () => true)
     await syncSelf($ as unknown as Api)
-    if ((await $.store.get(COLLAPSED_KEY)) !== true) {
+    // open the tree only where it has something to show: a light branch of
+    // this session's, or a session map with 2+ sessions in this family
+    const hasBranches = (await read($, nodesAtom)).length > 0
+    const hasFamily = familyOf(await read($, graphAtom), await read($, currentIdAtom)).length >= 2
+    if ((hasBranches || hasFamily) && (await $.store.get(COLLAPSED_KEY)) !== true) {
       const r = await $.ui.open({ id: PANE, title: TITLE })
       await update($, openAtom, () => r.isPlaced)
     }
