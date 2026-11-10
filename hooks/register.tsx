@@ -462,6 +462,7 @@ const syncSelf = async ($: Api) => {
     try {
       await appendRecord($, waiting)
       $.ui.toast('已把支線紀錄寫進這個重支線的歷史')
+      await showInherited($)
     } catch (err) {
       $.ui.toast(`寫入支線紀錄失敗：${String((err as Error)?.message ?? err)}`)
     }
@@ -505,8 +506,46 @@ const finishInplace = async ($: Api, oldId: string) => {
       $.ui.toast(`寫入支線紀錄失敗：${String((err as Error)?.message ?? err)}`)
     }
   }
-  if (job.fromBranch) await markUpgraded($, job.parentId, job.fromBranch, newSid)
+  if (job.fromBranch) {
+    const chain = await seedChild($, newSid, job.parentId, job.fromBranch)
+    await update($, nodesAtom, () => chain)
+    await markUpgraded($, job.parentId, job.fromBranch, newSid)
+    await showInherited($)
+  }
   $.ui.toast(`已原地切到重支線：${job.title}`)
+}
+
+/**
+ * Copy the upgraded branch (root → node, answered ones) into the child
+ * session's own tree: the record in its history is hidden from the person,
+ * so the tree and the reader are where they see what the branch started from.
+ */
+const seedChild = async ($: Api, childId: string, ownerSession: string, nodeId: string) => {
+  const saved = await $.store.get(storeKey(ownerSession))
+  if (!Array.isArray(saved)) return []
+  const done = chainOf(saved as BranchNode[], nodeId).filter(n => n.status === 'done')
+  const chain: BranchNode[] = done.map(({ upgradedTo: _u, ...n }, i) => ({
+    ...n,
+    parentId: i > 0 ? done[i - 1]!.id : null,
+    inherited: true,
+    merged: true,
+  }))
+  await $.store.set(storeKey(childId), chain)
+  return chain
+}
+
+/** a child just started from an upgrade: show what it was asked in the reader */
+const showInherited = async ($: Api) => {
+  const last = (await read($, nodesAtom)).filter(n => n.inherited).at(-1)
+  if (!last) return
+  await update($, selectedAtom, () => last.id)
+  // let the resumed history draw first, so the row lands after it
+  $.clock.after(1500, () => {
+    void (async () => {
+      placedAtSeq = -1
+      await openReader($, last.id, false)
+    })()
+  })
 }
 
 const markUpgraded = async ($: Api, ownerSession: string, nodeId: string, to: string) => {
@@ -556,6 +595,8 @@ const forkToTab = async ($: Api, fromId: string, spec: ForkSpec) => {
     }
     if (spec.record) g.pending[child] = spec.record
   })
+  // before the tab starts: the child loads its tree at its start
+  if (spec.fromBranch) await seedChild($, child, fromId, spec.fromBranch)
   const handle = await openTab($, `⑂ ${spec.title}`, ['--resume', fromId, '--fork-session', '--session-id', child, '-n', spec.title])
   if (handle) {
     await mutate($, g => {
@@ -729,7 +770,7 @@ export const register: Register = on => {
     const floatAt = vis && vis.last >= 2 && vis.last < vis.of - 1 ? vis.last - 1 : null
     const status =
       node.status === 'pending' ? ' · 回答中…' : node.status === 'error' ? ' · ✗ 失敗' : ''
-    const marks = `${node.merged ? ' · ⤴ 已併回主線' : ''}${node.upgradedTo ? ' · ⇪ 已升級成重支線' : ''}`
+    const marks = `${node.inherited ? ' · ⇣ 從上層 session 升級帶來，已寫進這個 session 的歷史' : node.merged ? ' · ⤴ 已併回主線' : ''}${node.upgradedTo ? ' · ⇪ 已升級成重支線' : ''}`
 
     return (
       <Box flexDirection="column">
@@ -768,7 +809,7 @@ export const register: Register = on => {
             </Box>
           )}
           <Box flexWrap="wrap" gap={1} marginTop={1}>
-            <Button key="merge" label="併回主線" onPress={() => void mergeBack($ as unknown as Api, node.id)} />
+            {!node.inherited && <Button key="merge" label="併回主線" onPress={() => void mergeBack($ as unknown as Api, node.id)} />}
             <Button key="up-here" label="⇪ 升級：原地" onPress={() => void upgradeNode($ as unknown as Api, node.id, 'here')} />
             <Button key="up-tab" label="⇪ 升級：新分頁" onPress={() => void upgradeNode($ as unknown as Api, node.id, 'tab')} />
             <Button key="del" label="刪除" onPress={() => removeNode($ as unknown as Api, node.id)} />
@@ -967,7 +1008,7 @@ export const register: Register = on => {
 
     const icon = (n: BranchNode) => (n.kind === 'q' ? '?' : '⑂')
     const mark = (n: BranchNode) =>
-      n.status === 'pending' ? ' …' : n.status === 'error' ? ' ✗' : n.upgradedTo ? ' ⇪' : n.merged ? ' ⤴' : ''
+      n.status === 'pending' ? ' …' : n.status === 'error' ? ' ✗' : n.upgradedTo ? ' ⇪' : n.inherited ? ' ⇣' : n.merged ? ' ⤴' : ''
 
     // the collapse button is pinned to the window's bottom-left while docked:
     // the tree is at least the window tall, the button drawn absolutely on the

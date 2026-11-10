@@ -15,6 +15,8 @@ export type BranchNode = {
   merged?: boolean
   /** upgraded into this heavy-branch session */
   upgradedTo?: string
+  /** carried over from the parent session when this session was upgraded from it */
+  inherited?: boolean
 }
 
 /** one real cc session in the project's session map */
