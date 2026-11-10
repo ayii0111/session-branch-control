@@ -306,11 +306,8 @@ test('the sidebar shows both systems, marks the session you are in, folds each, 
   const narrow = { ...PANE, props: { ...PANE.props, bodyColumns: 30 } }
   const pane = await $.ui.mount(narrow)
   expect((await pane.find({ key: 'light-toggle' }))?.text).toContain('▾')
-  expect((await pane.find({ key: 'map-toggle' }))?.text).toContain('重分支')
-  // this session alone in the heavy system, marked as where you are
-  const here = await pane.find({ key: 's-sess-5' })
-  expect(here?.text).toContain('▶')
-  expect(here?.text).toContain('目前')
+  // a session in no family has no heavy-branch system to show
+  expect(await pane.find({ key: 'map-toggle' })).toBeUndefined()
 
   const cellsOf = (s: string) => [...s].reduce((w, ch) => w + ((ch.codePointAt(0) ?? 0) >= 0x2190 && !((ch.codePointAt(0) ?? 0) >= 0x2500 && (ch.codePointAt(0) ?? 0) <= 0x259f) ? 2 : 1), 0)
   for (const b of await pane.findAll({ type: 'Button' })) {
@@ -318,11 +315,155 @@ test('the sidebar shows both systems, marks the session you are in, folds each, 
     expect(cellsOf(b.text ?? '')).toBeLessThanOrEqual(30)
   }
 
-  // fold the light system: its rows go, the heavy one stays
+  // fold the light system: its rows go
   await pane.press({ key: 'light-toggle' })
   expect((await pane.find({ key: 'light-toggle' }))?.text).toContain('▸')
   expect(await pane.find({ key: 'main' })).toBeUndefined()
-  expect(await pane.find({ key: 's-sess-5' })).toBeDefined()
+  await pane.unmount()
+})
+
+test('light branches list newest first and mark the one last read; ↳ primes a follow-up; delete leaves no trace', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  const filled: string[] = []
+  const placed: string[] = []
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.place', (_, e) => {
+    placed.push(e.id)
+    return { value: { isPlaced: true, requestId: `req-${e.id}` } }
+  })
+  on('ui.scroll', () => ({ value: { isScrolled: true } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.fill', (_, e) => {
+    filled.push(e.text)
+    return { isFilled: true }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'sess-6' }))
+  on('env.get', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/w' }))
+  on('fs.read', () => {
+    throw new Error('ENOENT')
+  })
+  on('fs.write', () => ({ value: undefined }))
+  on('session.turns', () => ({ value: 2 }))
+  on('model.fork', () => ({
+    value: { isAnswered: true, text: 'A', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+  }))
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'q', args: 'first' })
+  await clock.advance(10)
+  // back to the main thread, so the next one is a sibling, not a follow-up
+  let pane = await $.ui.mount(PANE)
+  await pane.press({ key: 'main' })
+  await pane.unmount()
+  await $.command.run({ command: 'q', args: 'second' })
+  await clock.advance(10)
+
+  pane = await $.ui.mount(PANE)
+  const branchRows = async () => (await pane.findAll({ type: 'Button' })).filter(b => /\? (first|second)/.test(b.text ?? ''))
+  let rows = await branchRows()
+  expect(rows.map(b => (b.text ?? '').includes('second'))).toEqual([true, false])
+
+  // read the older one: it is marked
+  await pane.press({ key: rows[1]!.key! })
+  await pane.unmount()
+  pane = await $.ui.mount(PANE)
+  rows = await branchRows()
+  expect(rows[1]?.text).toContain('剛看過')
+  expect(rows[0]?.text).not.toContain('剛看過')
+  await pane.unmount()
+
+  // the reader's ↳ primes /q under it
+  const row = placed.at(-1)!
+  const reader = await $.ui.mount({
+    plugin: 'session-branch-control',
+    component: 'Placed',
+    requestId: `req-${row}`,
+    surface: 'terminal',
+    props: { id: row, plugin: 'session-branch-control' },
+  })
+  await reader.press({ key: 'follow' })
+  expect(filled).toEqual(['/q '])
+  // delete: gone from the tree, the mark and the reader
+  await reader.press({ key: 'del' })
+  await reader.unmount()
+  pane = await $.ui.mount(PANE)
+  rows = await branchRows()
+  expect(rows.map(b => b.text ?? '').join()).not.toContain('first')
+  expect(rows.map(b => b.text ?? '').join()).not.toContain('剛看過')
+  await pane.unmount()
+})
+
+test('the heavy map names sessions as cc does and deletes one for real after a confirm', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  const graphFile = '/h/.claude/session-branch-control/-w.json'
+  const files = new Map<string, string>([
+    [
+      graphFile,
+      JSON.stringify({
+        sessions: {
+          P: { id: 'P', title: 'first prompt of P', parentId: null, createdAt: -1e9 },
+          K: { id: 'K', title: 'first prompt of K', parentId: 'P', createdAt: -1e9 },
+        },
+        pending: {},
+      }),
+    ],
+    ['/h/.claude/projects/-w/P.jsonl', '{"type":"ai-title","aiTitle":"cc summary"}\n{"type":"user"}\n'],
+    ['/h/.claude/projects/-w/K.jsonl', '{"type":"custom-title","customTitle":"old name"}\n{"type":"custom-title","customTitle":"my name"}\n'],
+  ])
+  const ran: string[][] = []
+  const asked: string[] = []
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.close', () => ({ value: undefined }))
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    for (const p of e.argv) files.delete(p)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'P' }))
+  on('session.root', () => ({ value: '/w' }))
+  on('session.cwd', () => ({ value: '/w' }))
+  on('fs.exists', (_, e) => ({ value: files.has(e.path) }))
+  on('fs.read', (_, e) => {
+    const t = files.get(e.path)
+    if (t === undefined) throw new Error('ENOENT')
+    return { value: t }
+  })
+  on('fs.write', (_, e) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+
+  let pane = await $.ui.mount(PANE)
+  expect((await pane.find({ key: 's-P' }))?.text).toContain('cc summary')
+  expect((await pane.find({ key: 's-K' }))?.text).toContain('my name')
+  expect(await pane.find({ key: 'm-sub' })).toBeUndefined()
+
+  await pane.press({ key: 's-K' })
+  expect(await pane.find({ key: 'm-tab' })).toBeDefined()
+  expect(await pane.find({ key: 'm-here' })).toBeDefined()
+  await pane.press({ key: 'm-del' })
+  expect(ran).toEqual([])
+  const dialog = await $.ui.mount({ ...PANE, requestId: 'sbc-confirm' })
+  asked.push((await dialog.find({ type: 'Text', text: /永久刪除/ }))?.text ?? '')
+  expect(asked[0]).toContain('my name')
+  await dialog.press({ key: 'yes' })
+  await dialog.unmount()
+  expect(ran[0]).toEqual(['rm', '-rf', '/h/.claude/projects/-w/K.jsonl', '/h/.claude/projects/-w/K'])
+  expect(Object.keys(JSON.parse(files.get(graphFile)!).sessions)).toEqual(['P'])
+  await pane.unmount()
+  // P alone is no family: the map is gone
+  pane = await $.ui.mount(PANE)
+  expect(await pane.find({ key: 'map-toggle' })).toBeUndefined()
   await pane.unmount()
 })
 

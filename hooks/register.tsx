@@ -16,7 +16,7 @@ import {
   switchTab,
   titleOfCurrent,
 } from './graph'
-import { sessionExists, writeBranchTranscript } from './transcript'
+import { deleteSession, sessionExists, sessionName, writeBranchTranscript } from './transcript'
 
 const graphAtom = atom({ plugin: 'session-branch-control', key: 'graph' } as const, { sessions: {}, pending: {} } as Graph, {
   shape: 'graph-1',
@@ -28,6 +28,17 @@ const mapSelectedAtom = atom({ plugin: 'session-branch-control', key: 'mapSelect
 const lightCollapsedAtom = atom({ plugin: 'session-branch-control', key: 'lightCollapsed' } as const, false)
 /** the light-branch section folded, kept across sessions like the map's */
 const LIGHT_COLLAPSED_KEY = 'pref:lightCollapsed'
+/** the light branch last opened in the reader, marked in the sidebar */
+const recentAtom = atom({ plugin: 'session-branch-control', key: 'recent' } as const, null as string | null)
+/** each family session's name in cc (/rename, else cc's summary title), by session id */
+const namesAtom = atom({ plugin: 'session-branch-control', key: 'names' } as const, {} as Record<string, string>, {
+  shape: 'names-1',
+})
+/** the heavy branch waiting on the delete dialog */
+const confirmAtom = atom({ plugin: 'session-branch-control', key: 'confirm' } as const, null as { id: string; name: string } | null, {
+  shape: 'confirm-1',
+})
+const CONFIRM = 'sbc-confirm'
 
 /** change the shared map file and redraw from what was written */
 const mutate = async ($: Api, fn: (g: Graph) => void) => {
@@ -182,7 +193,8 @@ const toRecord = (chain: readonly BranchNode[], purpose: 'merge' | 'upgrade') =>
 const flatten = (nodes: readonly BranchNode[]) => {
   const rows: { node: BranchNode; prefix: string }[] = []
   const walk = (parentId: string | null, indent: string) => {
-    const kids = nodes.filter(n => n.parentId === parentId)
+    // newest first, at every level
+    const kids = nodes.filter(n => n.parentId === parentId).sort((a, b) => b.at - a.at)
     kids.forEach((node, i) => {
       const last = i === kids.length - 1
       rows.push({ node, prefix: `${indent}${last ? '└ ' : '├ '}` })
@@ -267,6 +279,7 @@ const topVisible = () => {
  * press or command, where the engine lets a transcript row scroll).
  */
 const openReader = async ($: Api, nodeId: string, jump: boolean) => {
+  await update($, recentAtom, () => nodeId)
   const r = await read($, readerAtom)
   const reuse = r.row !== null && r.req !== null && placedAtSeq === seq
   // where the person reads now, unless that is the reader itself (then the
@@ -440,19 +453,28 @@ const upgradeWritten = async ($: Api, nodeId: string, spec: ForkSpec, where: 'he
   return true
 }
 
+/**
+ * Gone as if never asked: the node and every follow-up under it leave the
+ * tree, the reader and the marks. A heavy branch upgraded from one of them is
+ * a session of its own and stays.
+ */
 const removeNode = async ($: Api, id: string) => {
   const all = await read($, nodesAtom)
   const gone = descendantsOf(all, id)
   const target = all.find(n => n.id === id)
   await update($, nodesAtom, list => list.filter(n => !gone.has(n.id)))
   await update($, selectedAtom, s => (s && gone.has(s) ? (target?.parentId ?? null) : s))
+  await update($, recentAtom, v => (v && gone.has(v) ? null : v))
   const r = await read($, readerAtom)
-  if (r.node && gone.has(r.node)) {
-    const parent = target?.parentId
-    if (parent) await update($, readerAtom, v => ({ ...v, node: parent }))
-    else await closeReader($)
-  }
+  if (r.node && gone.has(r.node)) await closeReader($)
   await persist($)
+}
+
+/** ↳ follow up on `id`: new /q questions hang under it, the prompt is primed */
+const followUp = async ($: Api, id: string) => {
+  await update($, selectedAtom, () => id)
+  const filled = await $.prompt.fill({ text: '/q ' }).catch(() => undefined)
+  if (!filled?.isFilled) $.ui.toast('已選中這個節點：輸入 /q <問題> 接著追問')
 }
 
 const ask = async ($: Api, kind: BranchKind, text: string) => {
@@ -608,6 +630,7 @@ const pruneMap = async ($: Api, g: Graph, live: readonly string[], force = false
   if (!force && now - prunedAt < PRUNE_EVERY_MS) return
   prunedAt = now
   const cur = await $.session.id()
+  await refreshNames($, g, cur)
   const gone: string[] = []
   for (const s of Object.values(g.sessions)) {
     if (s.id === cur || now - s.createdAt < PRUNE_GRACE_MS || (s.tab && live.includes(s.tab))) continue
@@ -824,6 +847,44 @@ const removeFromMap = async ($: Api, id: string) => {
   await update($, mapSelectedAtom, () => null)
 }
 
+/** delete a heavy branch for real, its transcript included, once the person confirms */
+const deleteHeavy = async ($: Api, id: string) => {
+  const g = await read($, graphAtom)
+  const entry = g.sessions[id]
+  if (!entry) return
+  const live = await read($, liveTabsAtom)
+  if (entry.tab && live.includes(entry.tab)) {
+    $.ui.toast('它還開在某個分頁裡：先關掉那個分頁再刪除')
+    return
+  }
+  const name = (await read($, namesAtom))[id] ?? entry.title
+  // the mod's own dialog, 確定 focused so Enter confirms (the engine's question
+  // dialog may answer itself while the person is away: not for a delete)
+  await update($, confirmAtom, () => ({ id, name }))
+  await $.ui.open({ id: CONFIRM, title: '刪除 session', focus: true, closeOnEscape: true, holdToasts: true, rows: 6 })
+}
+
+const answerDelete = async ($: Api, yes: boolean) => {
+  const job = await read($, confirmAtom)
+  await update($, confirmAtom, () => null)
+  await $.ui.close({ id: CONFIRM })
+  if (!yes || !job) return
+  const removed = await deleteSession($, job.id)
+  await removeFromMap($, job.id)
+  $.ui.toast(removed ? `已刪除「${job.name.slice(0, 40)}」` : `找不到它的紀錄檔，只從地圖拿掉「${job.name.slice(0, 40)}」`)
+}
+
+/** what cc calls each session of the current family now */
+const refreshNames = async ($: Api, g: Graph, cur: string) => {
+  const names: Record<string, string> = {}
+  for (const { s } of flattenFamily(g, cur)) {
+    const n = await sessionName($, s.id)
+    if (n) names[s.id] = n
+  }
+  const prev = await read($, namesAtom)
+  if (JSON.stringify(prev) !== JSON.stringify(names)) await update($, namesAtom, () => names)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'q', description: '開輕分支：追問概念或「如果改成…會怎樣」（答案只進閱讀區，不進主線）', argumentHint: '[問題]' })
@@ -969,6 +1030,7 @@ export const register: Register = on => {
             {!node.inherited && <Button key="merge" label="併回主線" onPress={() => void mergeBack($ as unknown as Api, node.id)} />}
             <Button key="up-here" label="⇪ 升級：原地" onPress={() => void upgradeNode($ as unknown as Api, node.id, 'here')} />
             <Button key="up-tab" label="⇪ 升級：新分頁" onPress={() => void upgradeNode($ as unknown as Api, node.id, 'tab')} />
+            <Button key="follow" label="↳ 接著追問" onPress={() => void followUp($ as unknown as Api, node.id)} />
             <Button key="del" label="刪除" onPress={() => removeNode($ as unknown as Api, node.id)} />
           </Box>
         </Box>
@@ -1106,6 +1168,21 @@ export const register: Register = on => {
     return { text: `原地分出子 session「${title}」…` }
   })
 
+  // the delete dialog: Enter confirms, Esc cancels
+  on('ui.render', { component: 'Pane', requestId: CONFIRM }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const job = await read($, confirmAtom)
+    return (
+      <Box flexDirection="column">
+        <Text wrap="wrap">{`永久刪除 session「${(job?.name ?? '').slice(0, 40)}」？紀錄檔會一併刪除，無法復原。`}</Text>
+        <Box gap={1} marginTop={1}>
+          <Button key="yes" label="確定" variant="primary" hotkey="y" autoFocus onPress={() => answerDelete($ as unknown as Api, true)} />
+          <Button key="no" label="取消" hotkey="n" onPress={() => answerDelete($ as unknown as Api, false)} />
+        </Box>
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const nodes = await read($, nodesAtom)
@@ -1120,8 +1197,10 @@ export const register: Register = on => {
     const rows = flatten(nodes)
     const onPath = new Set(chainOf(nodes, sel ?? null).map(n => n.id))
     const famRows = flattenFamily(g, cur)
-    const picked = mapSel ? g.sessions[mapSel] : undefined
-    const curTitle = g.sessions[cur]?.title
+    const picked = mapSel && famRows.some(r => r.s.id === mapSel) ? g.sessions[mapSel] : undefined
+    const names = await read($, namesAtom)
+    const nameOf = (s: SessionEntry) => names[s.id] ?? s.title
+    const recent = await read($, recentAtom)
 
     const reader = await read($, readerAtom)
     const readerOpen = reader.row !== null && reader.open
@@ -1191,9 +1270,9 @@ export const register: Register = on => {
       </Button>
     )
 
-    // the heavy-branch system: this session's family, or this session alone
-    const heavyRows: { s: SessionEntry; prefix: string }[] =
-      famRows.length > 0 ? famRows : [{ s: { id: cur, title: curTitle ?? '目前 session', parentId: null, createdAt: 0 }, prefix: '' }]
+    // the heavy-branch system: shown only when this session is in a family
+    // (a lone entry left after its branches were deleted is no family)
+    const heavyRows = famRows.length >= 2 ? famRows : []
     const heavyRow = ({ s, prefix }: { s: SessionEntry; prefix: string }) => {
       const here = s.id === cur
       const gutter = here ? '▶ ' : '  '
@@ -1205,7 +1284,7 @@ export const register: Register = on => {
           <Text color="green" bold>{gutter}</Text>
           <Text dimColor>{prefix}</Text>
           <Text bold={here} color={here ? 'green' : undefined} inverse={s.id === mapSel}>
-            {cut(`${s.parentId ? '⑂' : '●'} ${s.title}`, Math.max(4, room))}
+            {cut(`${s.parentId ? '⑂' : '●'} ${nameOf(s)}`, Math.max(4, room))}
           </Text>
           <Text dimColor={!here} color={here ? 'green' : undefined}>{tail}</Text>
         </Button>
@@ -1224,16 +1303,24 @@ export const register: Register = on => {
               <Text dimColor>{` ${cut(mainLabel, cols - cells(INDENT) - 7)}`}</Text>
             </Button>
             {rows.map(({ node, prefix }) => {
+              const seenLast = node.id === recent
               const tail = ` #${node.turn}${mark(node)}`
-              const room = cols - cells(INDENT) - cells(prefix) - cells(tail)
+              const flag = seenLast ? ' ◂ 剛看過' : ''
+              const room = cols - cells(INDENT) - cells(prefix) - cells(tail) - cells(flag)
               return (
                 <Button key={node.id} plain onPress={select(node.id)}>
                   <Text>{INDENT}</Text>
                   <Text dimColor>{prefix}</Text>
-                  <Text bold={node.id === sel} inverse={node.id === sel} dimColor={!onPath.has(node.id) && node.status === 'done'}>
+                  <Text
+                    bold={node.id === sel || seenLast}
+                    inverse={node.id === sel}
+                    color={seenLast && node.id !== sel ? 'cyan' : undefined}
+                    dimColor={!seenLast && !onPath.has(node.id) && node.status === 'done'}
+                  >
                     {cut(`${icon(node)} ${node.text}`, Math.max(4, room))}
                   </Text>
                   <Text dimColor>{tail}</Text>
+                  {seenLast && <Text color="cyan">{flag}</Text>}
                 </Button>
               )
             })}
@@ -1251,39 +1338,24 @@ export const register: Register = on => {
             )}
           </Box>
         )}
-        <Box height={1} />
-        {section('map-toggle', !mapCollapsed, `重分支 · session 地圖（${heavyRows.length}）`, toggleMap)}
-        {!mapCollapsed && (
+        {heavyRows.length > 0 && <Box height={1} />}
+        {heavyRows.length > 0 && section('map-toggle', !mapCollapsed, `重分支 · session 地圖（${heavyRows.length}）`, toggleMap)}
+        {heavyRows.length > 0 && !mapCollapsed && (
           <Box flexDirection="column">
             {heavyRows.map(heavyRow)}
-            {heavyRows.length < 2 && (
-              <Box paddingLeft={2}>
-                <Text dimColor wrap="wrap">還沒有重分支。/sub 開新分頁、/sub-here 原地分出，或把輕分支升級</Text>
-              </Box>
-            )}
             {picked && (
               <Box flexDirection="column" borderStyle="single" borderDimColor paddingX={1} marginLeft={2}>
-                <Text bold>{cut(picked.title, cols - 6)}</Text>
+                <Text bold>{cut(nameOf(picked), cols - 6)}</Text>
                 <Text dimColor wrap="wrap">
-                  {`${picked.parentId ? `從「${g.sessions[picked.parentId]?.title ?? '?'}」第 ${picked.fromTurn ?? '?'} 輪分出` : '根 session'}${picked.fromBranch ? ' · 由輕分支升級' : ''}${picked.tab && live.includes(picked.tab) ? ' · ▣ 已開在分頁' : ''}${picked.id === cur ? ' · 你目前在這裡' : ''}`}
+                  {`${picked.parentId ? `從「${(() => { const p = g.sessions[picked.parentId]; return p ? nameOf(p) : '?' })()}」第 ${picked.fromTurn ?? '?'} 輪分出` : '根 session'}${picked.fromBranch ? ' · 由輕分支升級' : ''}${picked.tab && live.includes(picked.tab) ? ' · ▣ 已開在分頁' : ''}${picked.id === cur ? ' · 你目前在這裡' : ''}`}
                 </Text>
-                <Box flexDirection="column" marginTop={1}>
-                  {picked.id !== cur && <Button key="m-here" label="⇄ 原地切換" onPress={() => void switchHere(($ as unknown as Api), picked.id)} />}
-                  {picked.id !== cur && <Button key="m-tab" label="▣ 分頁開啟" onPress={() => void openInTab(($ as unknown as Api), picked.id)} />}
-                  <Button
-                    key="m-sub"
-                    label="＋ 子 session（新分頁）"
-                    onPress={() => void forkToTab(($ as unknown as Api), picked.id, { title: childTitle(g, picked.id), fromTurn: 0 })}
-                  />
-                  {picked.id === cur && (
-                    <Button
-                      key="m-subhere"
-                      label="＋ 子 session（原地）"
-                      onPress={() => void (async () => forkHere(($ as unknown as Api), { title: childTitle(g, cur), fromTurn: await $.session.turns() }))()}
-                    />
-                  )}
-                  {picked.id !== cur && <Button key="m-del" label="從地圖移除" onPress={() => void removeFromMap(($ as unknown as Api), picked.id)} />}
-                </Box>
+                {picked.id !== cur && (
+                  <Box flexDirection="column" marginTop={1}>
+                    <Button key="m-tab" label="▣ 在新分頁開啟" onPress={() => void openInTab(($ as unknown as Api), picked.id)} />
+                    <Button key="m-here" label="⇄ 切換成目前 session" onPress={() => void switchHere(($ as unknown as Api), picked.id)} />
+                    <Button key="m-del" label="🗑 刪除" onPress={() => deleteHeavy(($ as unknown as Api), picked.id)} />
+                  </Box>
+                )}
               </Box>
             )}
           </Box>

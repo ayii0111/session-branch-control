@@ -1,6 +1,6 @@
 {
   "name": "session-branch-control",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Side branches for questions (/q: concepts or what-ifs) answered off the main thread, upgradeable into real child sessions, with a tree pane and a per-project session map",
   "author": { "name": "ayii" },
   "types": "./types/index.d.ts"

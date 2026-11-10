@@ -48,6 +48,44 @@ export async function sessionExists($: Api, sessionId: string) {
   return false
 }
 
+/** the last `"type":"<type>"` row's `field` in a transcript's text */
+const lastField = (text: string, type: string, field: string) => {
+  const at = text.lastIndexOf(`"type":"${type}"`)
+  if (at < 0) return undefined
+  const start = text.lastIndexOf('\n', at) + 1
+  const end = text.indexOf('\n', at)
+  try {
+    const v = (JSON.parse(text.slice(start, end < 0 ? undefined : end)) as Record<string, unknown>)[field]
+    return typeof v === 'string' && v.trim() ? v.trim() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The name cc shows for `sessionId`: the one the person gave it (/rename),
+ * else cc's own summary title. Unlike a first prompt, neither moves on compaction.
+ */
+export async function sessionName($: Api, sessionId: string) {
+  const src = await findTranscript($, sessionId)
+  if (!src) return undefined
+  return lastField(src.text, 'custom-title', 'customTitle') ?? lastField(src.text, 'ai-title', 'aiTitle')
+}
+
+/** delete `sessionId`'s transcript and its side folder (subagents, tool results) for good */
+export async function deleteSession($: Api, sessionId: string) {
+  const home = (await $.env.get('HOME')) ?? ''
+  const dirs = new Set([await $.session.root(), await $.session.cwd()])
+  let removed = false
+  for (const dir of dirs) {
+    const base = `${home}/.claude/projects/${dir.replace(/[^A-Za-z0-9]/g, '-')}/${sessionId}`
+    if (!(await $.fs.exists(`${base}.jsonl`))) continue
+    const r = await $.process.run(['rm', '-rf', `${base}.jsonl`, base])
+    if (r.exitCode === 0) removed = true
+  }
+  return removed
+}
+
 const parseRows = (text: string) => {
   const rows: Row[] = []
   for (const line of text.split('\n')) {
