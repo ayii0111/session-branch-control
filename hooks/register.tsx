@@ -1065,23 +1065,25 @@ export const register: Register = on => {
     const fam = familyOf(g, cur).length
     if (isOpen || (nodes.length === 0 && fam < 2)) return next(e)
     const sel = await read($, selectedAtom)
-    const current = sel ? nodes.find(n => n.id === sel) : undefined
-    const pending = nodes.filter(n => n.status === 'pending').length
-    const { Box, Text, Button } = $.ui.resolve(e)
-    const where = current ? `${current.kind === 'q' ? '?' : '⑂'} ${current.text}` : (g.sessions[cur]?.title ?? '● 主線')
     const reader = await read($, readerAtom)
+    const recent = await read($, recentAtom)
     const readerOpen = reader.row !== null && reader.open
-    const info = `${fam >= 2 ? `${fam} 個 session · ` : ''}${nodes.length} 條支線${pending ? ` · ${pending} 回答中…` : ''} · 目前：`
+    // the branch the reader holds (else the one last read, else the selected): its turn and question
+    const shownId = [reader.row ? reader.node : null, recent, sel].find(id => id && nodes.some(n => n.id === id))
+    const shown = shownId ? nodes.find(n => n.id === shownId) : undefined
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const turn = shown ? `#${shown.turn} ` : ''
+    const question = shown ? `${shown.text}${shown.status === 'pending' ? ' …' : ''}` : ''
     const treeLabel = '  [展開樹 /t]'
     const readerLabel = readerOpen ? '[📖 收合閱讀 /r]' : '[📖 閱讀 /r]'
     // one row: size the free text by display width (CJK takes two cells)
-    const room = e.props.bodyColumns - cells('🌳 ') - cells(info) - cells(treeLabel) - (nodes.length > 0 ? cells(readerLabel) + 1 : 0) - 1
+    const room = e.props.bodyColumns - cells('🌳 ') - cells(turn) - cells(treeLabel) - (nodes.length > 0 ? cells(readerLabel) + 1 : 0) - 1
     return (
       <Box gap={1}>
         <Button key="expand" plain onPress={() => void openPane($ as unknown as Api)}>
           <Text>🌳 </Text>
-          <Text dimColor>{info}</Text>
-          <Text>{cut(where, Math.max(6, room))}</Text>
+          <Text dimColor>{turn}</Text>
+          <Text>{cut(question, Math.max(6, room))}</Text>
           <Text dimColor>{treeLabel}</Text>
         </Button>
         {nodes.length > 0 && <Button key="reader" plain label={readerLabel} onPress={() => toggleReader($ as unknown as Api)} />}
