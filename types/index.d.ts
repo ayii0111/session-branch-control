@@ -17,6 +17,8 @@ export type BranchNode = {
   upgradedTo?: string
   /** carried over from the parent session when this session was upgraded from it */
   inherited?: boolean
+  /** uuid of the conversation's newest row when it was asked: gone from the path = rewound */
+  anchor?: string
 }
 
 /** one real cc session in the project's session map */
@@ -74,6 +76,7 @@ declare module 'claude-code' {
       names: Shaped<Record<string, string>>
       confirm: Shaped<{ id: string; name: string } | null>
       view: Shaped<{ at: number; total: number } | null>
+      rewound: string[]
     }
   }
 }

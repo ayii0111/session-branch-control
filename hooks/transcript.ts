@@ -65,6 +65,8 @@ export type PromptIndex = {
   order: Map<string, number>
   /** the prompts so far */
   total: number
+  /** the newest row's uuid: what a branch opened now stands on */
+  leaf: string | undefined
 }
 
 /** a prompt the person typed: no tool result, no command echo, reminder or compaction summary */
@@ -106,7 +108,7 @@ export async function promptIndex($: Api, sessionId: string): Promise<PromptInde
     turnOf.set(r.uuid!, total)
     order.set(r.uuid!, i)
   })
-  return { turnOf, order, total }
+  return { turnOf, order, total, leaf: leaf?.uuid }
 }
 
 /** the last `"type":"<type>"` row's `field` in a transcript's text */

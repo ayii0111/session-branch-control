@@ -39,6 +39,8 @@ const namesAtom = atom({ plugin: 'session-branch-control', key: 'names' } as con
 const viewAtom = atom({ plugin: 'session-branch-control', key: 'view' } as const, null as { at: number; total: number } | null, {
   shape: 'view-1',
 })
+/** branches whose context a rewind took out of the conversation (theirs or an ancestor's) */
+const rewoundAtom = atom({ plugin: 'session-branch-control', key: 'rewound' } as const, [] as string[])
 const confirmAtom = atom({ plugin: 'session-branch-control', key: 'confirm' } as const, null as { id: string; name: string } | null, {
   shape: 'confirm-1',
 })
@@ -232,6 +234,8 @@ const loadFor = async ($: Api) => {
   indexedAt = -Infinity
   seen.clear()
   await update($, viewAtom, () => null)
+  await update($, rewoundAtom, () => [])
+  await refreshIndex($, true)
 }
 
 // ---- reader: a full-width row placed in the transcript -----------------------
@@ -306,6 +310,22 @@ const refreshIndex = async ($: Api, force = false) => {
   })()
   await indexing
   indexing = undefined
+  await syncRewound($)
+}
+
+/**
+ * A branch stands on the row that was newest when it was asked. Once that row
+ * is off the conversation's path (a rewind went back past it), the main
+ * thread no longer holds what the answer drew on, and neither does a
+ * follow-up under it.
+ */
+const syncRewound = async ($: Api) => {
+  if (!index) return
+  const nodes = await read($, nodesAtom)
+  const own = new Set(nodes.filter(n => n.anchor && !index!.order.has(n.anchor)).map(n => n.id))
+  const ids = nodes.filter(n => chainOf(nodes, n.id).some(c => own.has(c.id))).map(n => n.id)
+  const prev = await read($, rewoundAtom)
+  if (prev.join() !== ids.join()) await update($, rewoundAtom, () => ids)
 }
 
 /**
@@ -579,6 +599,8 @@ const ask = async ($: Api, kind: BranchKind, text: string, parentId: string | nu
     status: 'pending',
     turn: await promptsNow($),
     at: await $.clock.now(),
+    // the row it stands on (promptsNow just read the file)
+    ...(index?.leaf ? { anchor: index.leaf } : {}),
   }
   await update($, nodesAtom, list => [...list, node])
   await update($, selectedAtom, () => node.id)
@@ -1045,7 +1067,18 @@ export const register: Register = on => {
     if (!node) return next(e)
     const r = await read($, readerAtom)
     const focused = r.node === node.id
+    const rewound = (await read($, rewoundAtom)).includes(node.id)
     const { Box, Text, Button, Markdown } = $.ui.resolve(e)
+    // an action that hands the answer on to a conversation that no longer has its
+    // context: marked ⚠ in yellow while the branch is rewound
+    const doubtful = (key: string, text: string, onPress: () => void) =>
+      rewound ? (
+        <Button key={key} onPress={onPress}>
+          <Text color="yellow">{`⚠ ${text}`}</Text>
+        </Button>
+      ) : (
+        <Button key={key} label={text} onPress={onPress} />
+      )
     const icon = (n: BranchNode) => (n.kind === 'q' ? '?' : '⑂')
     const label = `${icon(node)} ${node.kind === 'q' ? '追問' : '假設'}：${node.text}`
     const fold = () => foldReader($ as unknown as Api, node.id)
@@ -1063,6 +1096,7 @@ export const register: Register = on => {
         <Box gap={1}>
           <Button key="unfold" plain label="[▸ 展開]" onPress={() => openReader($ as unknown as Api, node.id, 'here')} />
           <Text dimColor>📖</Text>
+          {rewound && <Text color="yellow">↶</Text>}
           <Text wrap="truncate-end">{label}</Text>
         </Box>
       )
@@ -1113,11 +1147,18 @@ export const register: Register = on => {
               ))}
             </Box>
           )}
+          {rewound && (
+            <Box marginTop={1}>
+              <Text color="yellow" wrap="wrap">
+                ↶ 這條支線的脈絡已被 rewind 退回：它回答時依據的對話，目前的主線已經看不到了。標 ⚠ 的動作會把它交給沒有這段脈絡的對話，結果可能接不上。
+              </Text>
+            </Box>
+          )}
           <Box flexWrap="wrap" gap={1} marginTop={1}>
-            {!node.inherited && <Button key="merge" label="併回主線" onPress={() => void mergeBack($ as unknown as Api, node.id)} />}
-            <Button key="up-here" label="⇪ 升級：原地" onPress={() => void upgradeNode($ as unknown as Api, node.id, 'here')} />
-            <Button key="up-tab" label="⇪ 升級：新分頁" onPress={() => void upgradeNode($ as unknown as Api, node.id, 'tab')} />
-            <Button key="follow" label="↳ 接著追問" onPress={() => void followUp($ as unknown as Api, node.id)} />
+            {!node.inherited && doubtful('merge', '併回主線', () => void mergeBack($ as unknown as Api, node.id))}
+            {doubtful('up-here', '⇪ 升級：原地', () => void upgradeNode($ as unknown as Api, node.id, 'here'))}
+            {doubtful('up-tab', '⇪ 升級：新分頁', () => void upgradeNode($ as unknown as Api, node.id, 'tab'))}
+            {doubtful('follow', '↳ 接著追問', () => void followUp($ as unknown as Api, node.id))}
             <Button key="del" label="刪除" onPress={() => removeNode($ as unknown as Api, node.id)} />
           </Box>
         </Box>
@@ -1220,8 +1261,11 @@ export const register: Register = on => {
     const target = await followTarget($)
     if (!target) return { text: '沒有可以接著追問的輕分支：先用 /q 開一條，或在側欄點選一條' }
     const parent = (await read($, nodesAtom)).find(n => n.id === target)
+    const rewound = (await read($, rewoundAtom)).includes(target)
     await ask($, 'q', text, target)
-    return { text: `接著「${(parent?.text ?? '').slice(0, 30)}」追問，答案會出現在下方的 📖 閱讀區` }
+    return {
+      text: `接著「${(parent?.text ?? '').slice(0, 30)}」追問，答案會出現在下方的 📖 閱讀區${rewound ? '\n⚠ 這條支線的脈絡已被 rewind 退回：主線看不到它當初依據的對話，回答可能接不上' : ''}`,
+    }
   })
 
   on('command.run', { command: 'tree' }, async $ => {
@@ -1297,6 +1341,7 @@ export const register: Register = on => {
     const mapCollapsed = await read($, mapCollapsedAtom)
     const mapSel = await read($, mapSelectedAtom)
     const lightCollapsed = await read($, lightCollapsedAtom)
+    const rewound = await read($, rewoundAtom)
     const current = sel ? nodes.find(n => n.id === sel) : undefined
     const rows = flatten(nodes)
     const onPath = new Set(chainOf(nodes, sel ?? null).map(n => n.id))
@@ -1409,8 +1454,9 @@ export const register: Register = on => {
             {rows.map(({ node, prefix }) => {
               const seenLast = node.id === recent
               const tail = ` #${node.turn}${mark(node)}`
+              const back = rewound.includes(node.id) ? ' ↶' : ''
               const flag = seenLast ? ' ◂ 剛看過' : ''
-              const room = cols - cells(INDENT) - cells(prefix) - cells(tail) - cells(flag)
+              const room = cols - cells(INDENT) - cells(prefix) - cells(tail) - cells(back) - cells(flag)
               return (
                 <Button key={node.id} plain onPress={select(node.id)}>
                   <Text>{INDENT}</Text>
@@ -1424,6 +1470,7 @@ export const register: Register = on => {
                     {cut(`${icon(node)} ${node.text}`, Math.max(4, room))}
                   </Text>
                   <Text dimColor>{tail}</Text>
+                  {back && <Text color="yellow">{back}</Text>}
                   {seenLast && <Text color="cyan">{flag}</Text>}
                 </Button>
               )

@@ -520,7 +520,7 @@ test('sessions whose transcript is gone leave the map; a young one and the curre
 test('prompt numbers run through a compaction: a branch takes the count, 📍 shows where the screen is', async ($, on) => {
   const clock = mock.clock(on)
   mock.store(on)
-  const u = (n: number) => `0000000${n}-0000-4000-8000-000000000000`
+  const u = (n: number) => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`
   const row = (o: Record<string, unknown>) => JSON.stringify({ isSidechain: false, sessionId: 'S', ...o })
   const prompt = (n: number, parent: string | null, text: string) => row({ type: 'user', uuid: u(n), parentUuid: parent, message: { role: 'user', content: text } })
   const reply = (n: number, parent: string) => row({ type: 'assistant', uuid: u(n), parentUuid: parent, message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } })
@@ -541,8 +541,16 @@ test('prompt numbers run through a compaction: a branch takes the count, 📍 sh
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.close', () => ({ value: undefined }))
-  on('ui.place', (_, e) => ({ value: { isPlaced: true, requestId: `req-${e.id}` } }))
-  on('ui.toast', () => ({ value: undefined }))
+  const placed: string[] = []
+  on('ui.place', (_, e) => {
+    placed.push(e.id)
+    return { value: { isPlaced: true, requestId: `req-${e.id}` } }
+  })
+  const toasts: string[] = []
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
   on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'S' }))
@@ -588,4 +596,37 @@ test('prompt numbers run through a compaction: a branch takes the count, 📍 sh
   })
   expect((await band.findAll({ type: 'Text' })).map(t => t.text).join('|')).toContain('📍 2/3')
   await band.unmount()
+
+  // a rewind back to the second prompt's reply, then a new prompt from there:
+  // the branch asked after the third prompt lost its context
+  files.set('/h/.claude/projects/-w/S.jsonl', `${[...lines, prompt(11, u(5), 'redo'), reply(12, u(11))].join('\n')}\n`)
+  // the file is re-read at most every 5 s for messages it did not have
+  await clock.advance(6000)
+  const fresh = await $.ui.mount({
+    plugin: 'session-branch-control',
+    component: 'AssistantMessage',
+    requestId: u(12),
+    surface: 'terminal',
+    props: { onScreen: { first: 0, last: 3, of: 4 } },
+  } as never)
+  await fresh.unmount()
+  await clock.advance(100)
+  const after = await $.ui.mount(PANE)
+  const marked = (await after.findAll({ type: 'Button' })).find(b => /\? Q/.test(b.text ?? ''))
+  expect(marked?.text).toContain('↶')
+  expect(toasts.join('\n')).toContain('支線回答好了')
+
+  // its reader: the warning, ⚠ on what hands the answer on, delete left plain
+  const reader = await $.ui.mount({
+    plugin: 'session-branch-control',
+    component: 'Placed',
+    requestId: `req-${placed[0]}`,
+    surface: 'terminal',
+    props: { id: placed[0]!, plugin: 'session-branch-control' },
+  })
+  expect((await reader.find({ type: 'Text', text: /rewind/ }))?.text).toContain('rewind')
+  for (const key of ['merge', 'up-here', 'up-tab', 'follow']) expect((await reader.find({ key }))?.text).toContain('⚠')
+  expect((await reader.find({ key: 'del' }))?.text).not.toContain('⚠')
+  await reader.unmount()
+  await after.unmount()
 })
