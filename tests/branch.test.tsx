@@ -275,3 +275,53 @@ test('upgrading writes the child transcript: the fork chain, then the branch as 
   expect(rows.at(-1)).toEqual({ type: 'last-prompt', lastPrompt: 'Q2', leafUuid: a2.uuid, sessionId: childId })
   expect(rows.some(r => r.type === 'file-history-snapshot')).toBe(true)
 })
+
+test('the sidebar shows both systems, marks the session you are in, folds each, and keeps rows within its width', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.place', (_, e) => ({ value: { isPlaced: true, requestId: `req-${e.id}` } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'sess-5' }))
+  on('env.get', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/w' }))
+  on('fs.read', () => {
+    throw new Error('ENOENT')
+  })
+  on('fs.write', () => ({ value: undefined }))
+  on('session.turns', () => ({ value: 4 }))
+  on('model.fork', () => ({
+    value: {
+      isAnswered: true,
+      text: 'A',
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    },
+  }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'q', args: '一個非常非常長的中文問題，用來確認側欄在很窄的時候也不會折行或把版面撐破' })
+  await clock.advance(10)
+
+  const narrow = { ...PANE, props: { ...PANE.props, bodyColumns: 30 } }
+  const pane = await $.ui.mount(narrow)
+  expect((await pane.find({ key: 'light-toggle' }))?.text).toContain('▾')
+  expect((await pane.find({ key: 'map-toggle' }))?.text).toContain('重分支')
+  // this session alone in the heavy system, marked as where you are
+  const here = await pane.find({ key: 's-sess-5' })
+  expect(here?.text).toContain('▶')
+  expect(here?.text).toContain('目前')
+
+  const cellsOf = (s: string) => [...s].reduce((w, ch) => w + ((ch.codePointAt(0) ?? 0) >= 0x2e80 ? 2 : 1), 0)
+  for (const b of await pane.findAll({ type: 'Button' })) {
+    if (b.key === 'collapse' || b.key === 'reader') continue
+    expect(cellsOf(b.text ?? '')).toBeLessThanOrEqual(30)
+  }
+
+  // fold the light system: its rows go, the heavy one stays
+  await pane.press({ key: 'light-toggle' })
+  expect((await pane.find({ key: 'light-toggle' }))?.text).toContain('▸')
+  expect(await pane.find({ key: 'main' })).toBeUndefined()
+  expect(await pane.find({ key: 's-sess-5' })).toBeDefined()
+  await pane.unmount()
+})

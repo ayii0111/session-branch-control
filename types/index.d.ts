@@ -67,6 +67,7 @@ declare module 'claude-code' {
       liveTabs: string[]
       mapCollapsed: boolean
       mapSelected: string | null
+      lightCollapsed: boolean
       reader: Reader
     }
   }

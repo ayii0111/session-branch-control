@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { BranchKind, BranchNode, Graph, Reader } from '../types'
+import type { BranchKind, BranchNode, Graph, Reader, SessionEntry } from '../types'
 import {
   type Api,
   MAP_COLLAPSED_KEY,
@@ -25,6 +25,9 @@ const currentIdAtom = atom({ plugin: 'session-branch-control', key: 'currentId' 
 const liveTabsAtom = atom({ plugin: 'session-branch-control', key: 'liveTabs' } as const, [] as string[])
 const mapCollapsedAtom = atom({ plugin: 'session-branch-control', key: 'mapCollapsed' } as const, false)
 const mapSelectedAtom = atom({ plugin: 'session-branch-control', key: 'mapSelected' } as const, null as string | null)
+const lightCollapsedAtom = atom({ plugin: 'session-branch-control', key: 'lightCollapsed' } as const, false)
+/** the light-branch section folded, kept across sessions like the map's */
+const LIGHT_COLLAPSED_KEY = 'pref:lightCollapsed'
 
 /** change the shared map file and redraw from what was written */
 const mutate = async ($: Api, fn: (g: Graph) => void) => {
@@ -730,6 +733,8 @@ export const register: Register = on => {
     await loadFor($ as unknown as Api)
     await update($, mapCollapsedAtom, () => false)
     if ((await $.store.get(MAP_COLLAPSED_KEY)) === true) await update($, mapCollapsedAtom, () => true)
+    await update($, lightCollapsedAtom, () => false)
+    if ((await $.store.get(LIGHT_COLLAPSED_KEY)) === true) await update($, lightCollapsedAtom, () => true)
     await syncSelf($ as unknown as Api)
     // open the tree only where it has something to show: a light branch of
     // this session's, or a session map with 2+ sessions in this family
@@ -1009,12 +1014,11 @@ export const register: Register = on => {
     const live = await read($, liveTabsAtom)
     const mapCollapsed = await read($, mapCollapsedAtom)
     const mapSel = await read($, mapSelectedAtom)
+    const lightCollapsed = await read($, lightCollapsedAtom)
     const current = sel ? nodes.find(n => n.id === sel) : undefined
     const rows = flatten(nodes)
     const onPath = new Set(chainOf(nodes, sel ?? null).map(n => n.id))
-    const width = Math.max(20, e.props.bodyColumns - 2)
     const famRows = flattenFamily(g, cur)
-    const hasMap = famRows.length >= 2
     const picked = mapSel ? g.sessions[mapSel] : undefined
     const curTitle = g.sessions[cur]?.title
 
@@ -1049,49 +1053,120 @@ export const register: Register = on => {
       })()
     }
 
+    const toggleLight = () => {
+      void (async () => {
+        const now = !(await read($, lightCollapsedAtom))
+        await update($, lightCollapsedAtom, () => now)
+        await $.store.set(LIGHT_COLLAPSED_KEY, now)
+      })()
+    }
+
     const icon = (n: BranchNode) => (n.kind === 'q' ? '?' : '⑂')
     const mark = (n: BranchNode) =>
       n.status === 'pending' ? ' …' : n.status === 'error' ? ' ✗' : n.upgradedTo ? ' ⇪' : n.inherited ? ' ⇣' : n.merged ? ' ⤴' : ''
 
-    // the collapse button is pinned to the window's bottom-left while docked:
-    // the tree is at least the window tall, the button drawn absolutely on the
-    // window's last row, which follows the person's scroll (each scroll redraws)
+    // the footer is pinned to the window's bottom-left while docked: the tree
+    // is at least the window tall, the footer drawn absolutely on the window's
+    // last row, which follows the person's scroll (each scroll redraws)
     const dock = e.props.placement === 'dock'
     const { offset, bodyRows } = e.props.scroll
     const footerTop = offset + Math.max(1, bodyRows) - 1
-    const collapseButton = <Button key="collapse" label="⇥ 收合" hotkey="x" onPress={() => void closePane($ as unknown as Api)} />
+    const footer = (
+      <Box gap={1}>
+        <Button key="collapse" label="⇥ 收合" hotkey="x" onPress={() => void closePane($ as unknown as Api)} />
+        {nodes.length > 0 && readerButton('reader')}
+      </Box>
+    )
 
+    // Every row is one line, left-aligned, sized in terminal cells: nothing is
+    // pushed to the right edge, nothing wraps, so a narrow pane or a long
+    // title only shortens the text, never breaks the layout.
+    const cols = Math.max(16, e.props.bodyColumns - 1)
+    const INDENT = '  '
+    const section = (key: string, open: boolean, label: string, onPress: () => void) => (
+      <Button key={key} onPress={onPress}>
+        <Text>{open ? '▾ ' : '▸ '}</Text>
+        <Text bold>{cut(label, cols - 2)}</Text>
+      </Button>
+    )
+
+    // the heavy-branch system: this session's family, or this session alone
+    const heavyRows: { s: SessionEntry; prefix: string }[] =
+      famRows.length > 0 ? famRows : [{ s: { id: cur, title: curTitle ?? '目前 session', parentId: null, createdAt: 0 }, prefix: '' }]
+    const heavyRow = ({ s, prefix }: { s: SessionEntry; prefix: string }) => {
+      const here = s.id === cur
+      const gutter = here ? '▶ ' : '  '
+      const tail = `${s.fromTurn !== undefined ? ` #${s.fromTurn}` : ''}${s.tab && live.includes(s.tab) && !here ? ' ▣' : ''}${here ? ' 目前' : ''}`
+      const room = cols - cells(INDENT) - cells(gutter) - cells(prefix) - cells(tail)
+      return (
+        <Button key={`s-${s.id}`} onPress={() => update($, mapSelectedAtom, v => (v === s.id ? null : s.id))}>
+          <Text>{INDENT}</Text>
+          <Text color="green" bold>{gutter}</Text>
+          <Text dimColor>{prefix}</Text>
+          <Text bold={here} color={here ? 'green' : undefined} inverse={s.id === mapSel}>
+            {cut(`${s.parentId ? '⑂' : '●'} ${s.title}`, Math.max(4, room))}
+          </Text>
+          <Text dimColor={!here} color={here ? 'green' : undefined}>{tail}</Text>
+        </Button>
+      )
+    }
+
+    const mainLabel = sel ? '（點此回到主線底下）' : '← 新的 /q 接在這'
     return (
       <Box flexDirection="column" minHeight={dock ? bodyRows : undefined}>
-        {hasMap && (
-          <Box flexDirection="column" marginBottom={1}>
-            <Box justifyContent="space-between">
-              <Button key="map-toggle" onPress={toggleMap}>
-                <Text bold>{`🗺 Session 地圖（${famRows.length}）`}</Text>
-                <Text dimColor>{mapCollapsed ? '  [+ 展開]' : '  [− 收合]'}</Text>
-              </Button>
-              {rows.length > 0 && readerButton('reader')}
-            </Box>
-            {!mapCollapsed &&
-              famRows.map(({ s, prefix }) => (
-                <Button key={`s-${s.id}`} onPress={() => update($, mapSelectedAtom, v => (v === s.id ? null : s.id))}>
+        {section('light-toggle', !lightCollapsed, `輕分支 · 這個 session 的追問（${nodes.length}）`, toggleLight)}
+        {!lightCollapsed && (
+          <Box flexDirection="column">
+            <Button key="main" onPress={goMain}>
+              <Text>{INDENT}</Text>
+              <Text bold={!sel} inverse={!sel}>● 主線</Text>
+              <Text dimColor>{` ${cut(mainLabel, cols - cells(INDENT) - 7)}`}</Text>
+            </Button>
+            {rows.map(({ node, prefix }) => {
+              const tail = ` #${node.turn}${mark(node)}`
+              const room = cols - cells(INDENT) - cells(prefix) - cells(tail)
+              return (
+                <Button key={node.id} onPress={select(node.id)}>
+                  <Text>{INDENT}</Text>
                   <Text dimColor>{prefix}</Text>
-                  <Text bold={s.id === cur} inverse={s.id === mapSel} wrap="truncate-end">
-                    {cut(`${s.parentId ? '⑂' : '●'} ${s.title}`, Math.max(12, width - cells(prefix) - 14))}
+                  <Text bold={node.id === sel} inverse={node.id === sel} dimColor={!onPath.has(node.id) && node.status === 'done'}>
+                    {cut(`${icon(node)} ${node.text}`, Math.max(4, room))}
                   </Text>
-                  <Text dimColor>
-                    {`${s.fromTurn !== undefined ? ` #${s.fromTurn}` : ''}${s.tab && live.includes(s.tab) && s.id !== cur ? ' ▣' : ''}`}
-                  </Text>
-                  {s.id === cur && <Text color="green"> ◀ 你在這</Text>}
+                  <Text dimColor>{tail}</Text>
                 </Button>
-              ))}
-            {!mapCollapsed && picked && (
-              <Box flexDirection="column" borderStyle="single" borderDimColor paddingX={1}>
-                <Text bold wrap="truncate-end">{picked.title}</Text>
-                <Text dimColor>
-                  {`${picked.parentId ? `從「${g.sessions[picked.parentId]?.title ?? '?'}」第 ${picked.fromTurn ?? '?'} 輪分出` : '根 session'}${picked.fromBranch ? ' · 由輕支線升級' : ''}${picked.tab && live.includes(picked.tab) ? ' · ▣ 已開在分頁' : ''}`}
+              )
+            })}
+            {rows.length === 0 && (
+              <Box paddingLeft={2}>
+                <Text dimColor wrap="wrap">還沒有輕分支。/q 追問概念、/wi 假設推演</Text>
+              </Box>
+            )}
+            {current && (
+              <Box paddingLeft={2}>
+                <Text dimColor wrap="wrap">
+                  {readerOpen && reader.node === current.id ? '📖 內容在對話下方的閱讀區' : '📖 點節點，在對話下方全寬閱讀'}
                 </Text>
-                <Box flexWrap="wrap" gap={1} marginTop={1}>
+              </Box>
+            )}
+          </Box>
+        )}
+        <Box height={1} />
+        {section('map-toggle', !mapCollapsed, `重分支 · session 地圖（${heavyRows.length}）`, toggleMap)}
+        {!mapCollapsed && (
+          <Box flexDirection="column">
+            {heavyRows.map(heavyRow)}
+            {heavyRows.length < 2 && (
+              <Box paddingLeft={2}>
+                <Text dimColor wrap="wrap">還沒有重分支。/sub 開新分頁、/sub-here 原地分出，或把輕分支升級</Text>
+              </Box>
+            )}
+            {picked && (
+              <Box flexDirection="column" borderStyle="single" borderDimColor paddingX={1} marginLeft={2}>
+                <Text bold>{cut(picked.title, cols - 6)}</Text>
+                <Text dimColor wrap="wrap">
+                  {`${picked.parentId ? `從「${g.sessions[picked.parentId]?.title ?? '?'}」第 ${picked.fromTurn ?? '?'} 輪分出` : '根 session'}${picked.fromBranch ? ' · 由輕分支升級' : ''}${picked.tab && live.includes(picked.tab) ? ' · ▣ 已開在分頁' : ''}${picked.id === cur ? ' · 你目前在這裡' : ''}`}
+                </Text>
+                <Box flexDirection="column" marginTop={1}>
                   {picked.id !== cur && <Button key="m-here" label="⇄ 原地切換" onPress={() => void switchHere(($ as unknown as Api), picked.id)} />}
                   {picked.id !== cur && <Button key="m-tab" label="▣ 分頁開啟" onPress={() => void openInTab(($ as unknown as Api), picked.id)} />}
                   <Button
@@ -1112,49 +1187,16 @@ export const register: Register = on => {
             )}
           </Box>
         )}
-        <Box justifyContent="space-between">
-          <Button key="main" onPress={goMain}>
-            <Text bold={!sel} inverse={!sel}>{`● ${hasMap && curTitle ? cut(curTitle, Math.max(8, width - 24)) : '主線'}`}</Text>
-            <Text dimColor>{sel ? '  （點此回主線）' : '  ← 你在這裡'}</Text>
-          </Button>
-          {!hasMap && rows.length > 0 && readerButton('reader')}
-        </Box>
-        {rows.length === 0 && (
-          <Text dimColor wrap="wrap">
-            還沒有輕支線。/q 追問概念、/wi 假設推演；/sub 開新分頁子 session、/sub-here 原地分出。
-          </Text>
-        )}
-        {rows.map(({ node, prefix }) => (
-          <Button key={node.id} onPress={select(node.id)}>
-            <Text dimColor>{prefix}</Text>
-            <Text
-              bold={node.id === sel}
-              inverse={node.id === sel}
-              dimColor={!onPath.has(node.id) && node.status === 'done'}
-              wrap="truncate-end"
-            >
-              {cut(`${icon(node)} ${node.text}`, Math.max(8, width - cells(prefix) - cells(` #${node.turn}${mark(node)}`)))}
-            </Text>
-            <Text dimColor>{` #${node.turn}${mark(node)}`}</Text>
-          </Button>
-        ))}
-        {current && (
-          <Text dimColor wrap="wrap">
-            {readerOpen && reader.node === current.id
-              ? '📖 內容在對話下方的閱讀區（/r 收合並捲回原處）'
-              : '📖 點節點或按「閱讀」在對話下方全寬閱讀'}
-          </Text>
-        )}
-        {/* docked: a blank last row, so the end of the list scrolls clear of the pinned button */}
+        {/* docked: a blank last row, so the end of the list scrolls clear of the pinned footer */}
         {dock && <Box height={1} />}
         {dock ? (
           <Box position="absolute" top={footerTop} left={0} width={e.props.bodyColumns}>
-            {collapseButton}
-            {/* spaces paint over the row beneath, so the button never sits on text */}
+            {footer}
+            {/* spaces paint over the row beneath, so the buttons never sit on text */}
             <Text wrap="truncate-end">{' '.repeat(e.props.bodyColumns)}</Text>
           </Box>
         ) : (
-          <Box marginTop={1}>{collapseButton}</Box>
+          <Box marginTop={1}>{footer}</Box>
         )}
       </Box>
     )
