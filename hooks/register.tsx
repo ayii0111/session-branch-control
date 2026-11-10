@@ -16,7 +16,7 @@ import {
   switchTab,
   titleOfCurrent,
 } from './graph'
-import { writeBranchTranscript } from './transcript'
+import { sessionExists, writeBranchTranscript } from './transcript'
 
 const graphAtom = atom({ plugin: 'session-branch-control', key: 'graph' } as const, { sessions: {}, pending: {} } as Graph, {
   shape: 'graph-1',
@@ -336,6 +336,14 @@ const upgradeNode = async ($: Api, id: string, where: 'here' | 'tab') => {
     $.ui.toast('這條支線還沒有完成的回答，不能升級')
     return
   }
+  // already upgraded into a session that still exists: go there, no duplicate
+  const done = (await read($, nodesAtom)).find(n => n.id === id)?.upgradedTo
+  if (done && (await sessionExists($, done))) {
+    $.ui.toast('這條已經升級過了，直接帶你到那個重分支')
+    if (where === 'here') await switchHere($, done)
+    else await openInTab($, done)
+    return
+  }
   // first choice: write the child's transcript with the branch as real turns;
   // cc's own fork (record hidden, shown in the reader) when that cannot be done
   if (await upgradeWritten($, id, spec, where)) return
@@ -530,6 +538,49 @@ const refreshGraph = async ($: Api) => {
   const live = (await listTabs($)).filter(t => t.connected !== false).map(t => t.handle)
   const prevLive = await read($, liveTabsAtom)
   if (prevLive.join() !== live.join()) await update($, liveTabsAtom, () => live)
+  await pruneMap($, g, live)
+}
+
+/** a session started this recently may not have written its transcript yet */
+const PRUNE_GRACE_MS = 3 * 60_000
+/** prune at most this often: one file check per session in the map */
+const PRUNE_EVERY_MS = 60_000
+let prunedAt = 0
+
+/**
+ * The map is the mod's own record; the sessions themselves are cc's. A session
+ * whose transcript is gone (deleted, or a tab that never started it) leaves
+ * the map: its children move up to its parent, a light branch upgraded into
+ * it can be upgraded again. The current session, a young entry, and one open
+ * in a live tab are kept.
+ */
+const pruneMap = async ($: Api, g: Graph, live: readonly string[], force = false) => {
+  const now = await $.clock.now()
+  if (!force && now - prunedAt < PRUNE_EVERY_MS) return
+  prunedAt = now
+  const cur = await $.session.id()
+  const gone: string[] = []
+  for (const s of Object.values(g.sessions)) {
+    if (s.id === cur || now - s.createdAt < PRUNE_GRACE_MS || (s.tab && live.includes(s.tab))) continue
+    if (!(await sessionExists($, s.id))) gone.push(s.id)
+  }
+  if (gone.length === 0) return
+  await mutate($, gg => {
+    for (const id of gone) {
+      const s = gg.sessions[id]
+      if (!s) continue
+      for (const o of Object.values(gg.sessions)) if (o.parentId === id) o.parentId = s.parentId
+      delete gg.sessions[id]
+      delete gg.pending[id]
+    }
+  })
+  await update($, mapSelectedAtom, v => (v && gone.includes(v) ? null : v))
+  // this session's light branches no longer point at a session that is gone
+  const nodes = await read($, nodesAtom)
+  if (nodes.some(n => n.upgradedTo && gone.includes(n.upgradedTo))) {
+    await update($, nodesAtom, list => list.map(({ upgradedTo, ...n }) => (upgradedTo && gone.includes(upgradedTo) ? n : { ...n, ...(upgradedTo ? { upgradedTo } : {}) })))
+    await persist($)
+  }
 }
 
 /** an in-place /branch this process asked for has landed: name the child, write its record */
@@ -742,6 +793,8 @@ export const register: Register = on => {
     await update($, lightCollapsedAtom, () => false)
     if ((await $.store.get(LIGHT_COLLAPSED_KEY)) === true) await update($, lightCollapsedAtom, () => true)
     await syncSelf($ as unknown as Api)
+    // drop sessions deleted since the map last saw them, before drawing it
+    await pruneMap($ as unknown as Api, await read($, graphAtom), await read($, liveTabsAtom), true)
     // open the tree only where it has something to show: a light branch of
     // this session's, or a session map with 2+ sessions in this family
     const hasBranches = (await read($, nodesAtom)).length > 0

@@ -38,6 +38,16 @@ async function findTranscript($: Api, sessionId: string) {
   return undefined
 }
 
+/** whether cc still keeps `sessionId`'s transcript (deleted sessions drop off the map) */
+export async function sessionExists($: Api, sessionId: string) {
+  const home = (await $.env.get('HOME')) ?? ''
+  const dirs = new Set([await $.session.root(), await $.session.cwd()])
+  for (const dir of dirs) {
+    if (await $.fs.exists(`${home}/.claude/projects/${dir.replace(/[^A-Za-z0-9]/g, '-')}/${sessionId}.jsonl`)) return true
+  }
+  return false
+}
+
 const parseRows = (text: string) => {
   const rows: Row[] = []
   for (const line of text.split('\n')) {

@@ -325,3 +325,47 @@ test('the sidebar shows both systems, marks the session you are in, folds each, 
   expect(await pane.find({ key: 's-sess-5' })).toBeDefined()
   await pane.unmount()
 })
+
+test('sessions whose transcript is gone leave the map; a young one and the current one stay', async ($, on) => {
+  mock.clock(on)
+  mock.store(on)
+  const graphFile = '/h/.claude/session-branch-control/-w.json'
+  const files = new Map<string, string>([
+    [
+      graphFile,
+      JSON.stringify({
+        sessions: {
+          P: { id: 'P', title: 'main', parentId: null, createdAt: -1e9 },
+          old: { id: 'old', title: 'deleted', parentId: 'P', createdAt: -1e9 },
+          kid: { id: 'kid', title: 'under deleted', parentId: 'old', createdAt: -1e9 },
+          young: { id: 'young', title: 'just opened', parentId: 'P', createdAt: 0 },
+        },
+        pending: { old: 'x' },
+      }),
+    ],
+  ])
+  const existing = new Set(['/h/.claude/projects/-w/P.jsonl', '/h/.claude/projects/-w/kid.jsonl'])
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'P' }))
+  on('session.root', () => ({ value: '/w' }))
+  on('session.cwd', () => ({ value: '/w' }))
+  on('fs.exists', (_, e) => ({ value: existing.has(e.path) }))
+  on('fs.read', (_, e) => {
+    const t = files.get(e.path)
+    if (t === undefined) throw new Error('ENOENT')
+    return { value: t }
+  })
+  on('fs.write', (_, e) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  const g = JSON.parse(files.get(graphFile)!)
+  expect(Object.keys(g.sessions).sort()).toEqual(['P', 'kid', 'young'])
+  expect(g.sessions.kid.parentId).toBe('P')
+  expect(g.pending).toEqual({})
+})
