@@ -135,6 +135,27 @@ export async function sessionName($: Api, sessionId: string) {
   return lastField(src.text, 'custom-title', 'customTitle') ?? lastField(src.text, 'ai-title', 'aiTitle')
 }
 
+/**
+ * Every session id cc keeps a transcript for, across all projects (the
+ * light-branch store is one for every project). Undefined when the folders
+ * cannot be listed: then nothing may be judged gone.
+ */
+export async function allSessionIds($: Api): Promise<Set<string> | undefined> {
+  const root = `${(await $.env.get('HOME')) ?? ''}/.claude/projects`
+  try {
+    const ids = new Set<string>()
+    for (const dir of await $.fs.list(root)) {
+      if (dir.kind !== 'dir') continue
+      for (const f of await $.fs.list(`${root}/${dir.name}`)) {
+        if (f.kind === 'file' && f.name.endsWith('.jsonl')) ids.add(f.name.slice(0, -'.jsonl'.length))
+      }
+    }
+    return ids.size > 0 ? ids : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** delete `sessionId`'s transcript and its side folder (subagents, tool results) for good */
 export async function deleteSession($: Api, sessionId: string) {
   const home = (await $.env.get('HOME')) ?? ''

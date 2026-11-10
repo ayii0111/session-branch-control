@@ -405,7 +405,29 @@ test('light branches list newest first and mark the one last read; ↳ primes a 
 
 test('the heavy map names sessions as cc does and deletes one for real after a confirm', async ($, on) => {
   mock.clock(on)
-  mock.store(on)
+  // the light-branch store: K's, P's, and one of a session deleted elsewhere
+  const store = new Map<string, unknown>([
+    ['tree:P', []],
+    ['tree:K', []],
+    ['tree:gone', []],
+  ])
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('store.delete', (_, e) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('fs.list', (_, e) => {
+    if (e.path === '/h/.claude/projects') return { value: [{ name: '-w', kind: 'dir', size: 0 }] }
+    const prefix = `${e.path}/`
+    return {
+      value: [...files.keys()].filter(p => p.startsWith(prefix)).map(p => ({ name: p.slice(prefix.length), kind: 'file', size: 1 })),
+    }
+  })
   const graphFile = '/h/.claude/session-branch-control/-w.json'
   const files = new Map<string, string>([
     [
@@ -448,6 +470,8 @@ test('the heavy map names sessions as cc does and deletes one for real after a c
     return { value: undefined }
   })
   await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  // the orphan went at the start; sessions that still exist keep theirs
+  expect([...store.keys()].filter(k => k.startsWith('tree:')).sort()).toEqual(['tree:K', 'tree:P'])
 
   let pane = await $.ui.mount(PANE)
   expect((await pane.find({ key: 's-P' }))?.text).toContain('cc summary')
@@ -466,6 +490,9 @@ test('the heavy map names sessions as cc does and deletes one for real after a c
   await dialog.unmount()
   expect(ran[0]).toEqual(['rm', '-rf', '/h/.claude/projects/-w/K.jsonl', '/h/.claude/projects/-w/K'])
   expect(Object.keys(JSON.parse(files.get(graphFile)!).sessions)).toEqual(['P'])
+  // its light branches went with it
+  expect(store.has('tree:K')).toBe(false)
+  expect(store.has('tree:P')).toBe(true)
   await pane.unmount()
   // P alone is no family: the map is gone
   pane = await $.ui.mount(PANE)

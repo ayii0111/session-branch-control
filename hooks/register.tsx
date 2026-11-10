@@ -16,7 +16,7 @@ import {
   switchTab,
   titleOfCurrent,
 } from './graph'
-import { type PromptIndex, deleteSession, promptIndex, sessionExists, sessionName, writeBranchTranscript } from './transcript'
+import { type PromptIndex, allSessionIds, deleteSession, promptIndex, sessionExists, sessionName, writeBranchTranscript } from './transcript'
 
 const graphAtom = atom({ plugin: 'session-branch-control', key: 'graph' } as const, { sessions: {}, pending: {} } as Graph, {
   shape: 'graph-1',
@@ -762,6 +762,28 @@ const pruneMap = async ($: Api, g: Graph, live: readonly string[], force = false
   }
 }
 
+/**
+ * The light-branch store is one for every project: a session whose transcript
+ * is gone everywhere (deleted with any tool) leaves its branches behind. Drop
+ * them, sparing this session and one the map saw born within the grace
+ * period (a child is seeded before cc writes its file).
+ */
+const pruneStore = async ($: Api) => {
+  const keys = (await $.store.keys()).filter(k => k.startsWith('tree:'))
+  if (keys.length === 0) return
+  const alive = await allSessionIds($)
+  if (!alive) return
+  const cur = await $.session.id()
+  const now = await $.clock.now()
+  const g = await read($, graphAtom)
+  for (const key of keys) {
+    const id = key.slice('tree:'.length)
+    const born = g.sessions[id]?.createdAt
+    if (id === cur || alive.has(id) || (born !== undefined && now - born < PRUNE_GRACE_MS)) continue
+    await $.store.delete(key)
+  }
+}
+
 /** an in-place /branch this process asked for has landed: name the child, write its record */
 const finishInplace = async ($: Api, oldId: string) => {
   const newSid = await $.session.id()
@@ -977,6 +999,8 @@ const answerDelete = async ($: Api, yes: boolean) => {
   if (!yes || !job) return
   const removed = await deleteSession($, job.id)
   await removeFromMap($, job.id)
+  // its light branches go with it
+  await $.store.delete(storeKey(job.id))
   $.ui.toast(removed ? `已刪除「${job.name.slice(0, 40)}」` : `找不到它的紀錄檔，只從地圖拿掉「${job.name.slice(0, 40)}」`)
 }
 
@@ -1011,6 +1035,7 @@ export const register: Register = on => {
     await syncSelf($ as unknown as Api)
     // drop sessions deleted since the map last saw them, before drawing it
     await pruneMap($ as unknown as Api, await read($, graphAtom), await read($, liveTabsAtom), true)
+    await pruneStore($ as unknown as Api)
     // open the tree only where it has something to show: a light branch of
     // this session's, or a session map with 2+ sessions in this family
     const hasBranches = (await read($, nodesAtom)).length > 0
