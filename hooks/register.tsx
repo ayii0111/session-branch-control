@@ -220,6 +220,8 @@ const seen = new Map<string, Seen>()
 let seq = 0
 /** `seq` when the reader row was placed: a row is reused while nothing new came after it */
 let placedAtSeq = -1
+/** whether the reader row is in the viewport, as its last draw was told */
+let readerOnScreen = false
 
 /**
  * A transcript message's requestId is its uuid (the transcript file's): only
@@ -257,8 +259,10 @@ const topVisible = () => {
 const openReader = async ($: Api, nodeId: string, jump: boolean) => {
   const r = await read($, readerAtom)
   const reuse = r.row !== null && r.req !== null && placedAtSeq === seq
-  const back = jump ? (reuse && r.open && r.back ? r.back : topVisible()) : r.back
-  if (jump) await trace($, `openReader jump node=${nodeId} reuse=${reuse} back=${back} ${seenSummary()}`)
+  // where the person reads now, unless that is the reader itself (then the
+  // place they came from before stays the one to go back to)
+  const back = jump ? (reuse && r.open && readerOnScreen && r.back ? r.back : (topVisible() ?? r.back)) : r.back
+  if (jump) await trace($, `openReader jump node=${nodeId} reuse=${reuse} readerOnScreen=${readerOnScreen} back=${back} ${seenSummary()}`)
   if (reuse) {
     await update($, readerAtom, v => ({ ...v, node: nodeId, open: true, back }))
   } else {
@@ -880,6 +884,7 @@ export const register: Register = on => {
     if (e.props.plugin !== 'session-branch-control') return next(e)
     const r = await read($, readerAtom)
     if (e.props.id !== r.row) return next(e)
+    readerOnScreen = !!e.props.onScreen
     const nodes = await read($, nodesAtom)
     const node = r.node ? nodes.find(n => n.id === r.node) : undefined
     if (!node) return next(e)
