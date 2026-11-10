@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { BranchKind, BranchNode, Graph, Reader, SessionEntry } from '../types'
+import type { BranchKind, BranchNode, Graph, MergeJob, MergeRow, Reader, SessionEntry } from '../types'
 import {
   type Api,
   MAP_COLLAPSED_KEY,
@@ -16,6 +16,7 @@ import {
   switchTab,
   titleOfCurrent,
 } from './graph'
+import { planMerge } from './merge'
 import { type PromptIndex, allSessionIds, deleteSession, promptIndex, sessionExists, sessionName, writeBranchTranscript } from './transcript'
 
 const graphAtom = atom({ plugin: 'session-branch-control', key: 'graph' } as const, { sessions: {}, pending: {} } as Graph, {
@@ -1004,6 +1005,92 @@ const answerDelete = async ($: Api, yes: boolean) => {
   $.ui.toast(removed ? `已刪除「${job.name.slice(0, 40)}」` : `找不到它的紀錄檔，只從地圖拿掉「${job.name.slice(0, 40)}」`)
 }
 
+// ---- merging another session into this one (hooks/merge.ts) -------------
+
+const MERGE = 'sbc-merge'
+const MERGE_ROW = 'merged-'
+const mergeJobAtom = atom({ plugin: 'session-branch-control', key: 'mergeJob' } as const, null as MergeJob | null, {
+  shape: 'merge-job-1',
+})
+const mergeRowsAtom = atom({ plugin: 'session-branch-control', key: 'mergeRows' } as const, {} as Record<string, MergeRow>, {
+  shape: 'merge-rows-1',
+})
+/** the record waiting on the dialog, and each merge row's record: too big to keep in state */
+let mergeText = ''
+const mergeTexts = new Map<string, string>()
+/** an unfolded merge row shows at most this much of its record */
+const MERGE_SHOW_MAX = 30_000
+
+/** ⤳ on the map: prime the prompt, the person presses Enter */
+const fillMerge = async ($: Api, id: string) => {
+  const filled = await $.prompt.fill({ text: `/merge ${id.slice(0, 8)}` }).catch(() => undefined)
+  if (!filled?.isFilled) $.ui.toast(`輸入 /merge ${id.slice(0, 8)} 把它併入目前 session`)
+}
+
+/** /merge's argument: a session on the map, by its id or the start of it */
+const resolveMergeArg = (g: Graph, arg: string): { id: string } | { error: string } => {
+  const a = arg.trim().toLowerCase()
+  if (!a) return { error: '用法：/merge <session id 前幾碼>：把地圖上那個 session 多出來的對話補進目前 session' }
+  const hits = Object.keys(g.sessions).filter(id => id.toLowerCase().startsWith(a))
+  if (hits.length === 1) return { id: hits[0]! }
+  return { error: hits.length === 0 ? `地圖上找不到 ${a} 開頭的 session` : `有 ${hits.length} 個 session 以 ${a} 開頭：多打幾碼` }
+}
+
+/** compare the two sessions; a job for the dialog, or why there is none */
+const prepareMerge = async ($: Api, fromId: string): Promise<MergeJob | string> => {
+  const cur = await $.session.id()
+  if (fromId === cur) return '不能把目前 session 併入它自己'
+  const g = await readGraph($)
+  const entry = g.sessions[fromId]
+  if (!entry) return '它不在 session 地圖上'
+  const name = (await read($, namesAtom))[fromId] ?? (await sessionName($, fromId)) ?? entry.title
+  const plan = await planMerge($, fromId, cur, name, entry.mergedInto?.[cur]?.upto)
+  if (plan === 'missing') return `讀不到「${name}」的紀錄檔`
+  if (plan === 'empty') return `「${name}」沒有目前 session 還沒有的內容`
+  mergeText = plan.text
+  const live = await read($, liveTabsAtom)
+  return {
+    from: fromId,
+    name,
+    upto: plan.upto,
+    prompts: plan.prompts,
+    tools: plan.tools,
+    preview: plan.preview,
+    otherCwd: plan.otherCwd ?? null,
+    trimmed: plan.trimmed,
+    live: !!entry.tab && live.includes(entry.tab),
+  }
+}
+
+const answerMerge = async ($: Api, yes: boolean) => {
+  const job = await read($, mergeJobAtom)
+  const text = mergeText
+  mergeText = ''
+  await update($, mergeJobAtom, () => null)
+  await $.ui.close({ id: MERGE })
+  if (!yes || !job || !text) return
+  const cur = await $.session.id()
+  try {
+    // a hidden user row, as merge-back writes: read next turn, no reload
+    await appendRecord($, text)
+  } catch (err) {
+    $.ui.toast(`併入失敗：${String((err as Error)?.message ?? err)}`)
+    return
+  }
+  const at = await $.clock.now()
+  await mutate($, g => {
+    const s = g.sessions[job.from]
+    if (!s) return
+    const prev = s.mergedInto?.[cur]
+    s.mergedInto = { ...s.mergedInto, [cur]: { upto: job.upto, at, prompts: (prev?.prompts ?? 0) + job.prompts } }
+  })
+  const rowId = `${MERGE_ROW}${job.from.slice(0, 8)}-${at.toString(36)}`
+  mergeTexts.set(rowId, text)
+  await update($, mergeRowsAtom, v => ({ ...v, [rowId]: { name: job.name, prompts: job.prompts, tools: job.tools, open: false } }))
+  await $.ui.place({ id: rowId })
+  $.ui.toast(`已把「${job.name.slice(0, 30)}」的 ${job.prompts} 次提問補進目前 session，下一輪就會讀到`)
+}
+
 /** what cc calls each session of the current family now */
 const refreshNames = async ($: Api, g: Graph, cur: string) => {
   const names: Record<string, string> = {}
@@ -1027,6 +1114,11 @@ export const register: Register = on => {
     await $.command.register({ name: 'sub', description: '從目前 session 分出子 session，開在新分頁', argumentHint: '[標題]' })
     await $.command.register({ name: 'sub-here', description: '從目前 session 分出子 session，原地切過去', argumentHint: '[標題]' })
     await $.command.register({ name: 'map', description: '開合 Session 地圖區塊', immediate: true })
+    await $.command.register({
+      name: 'merge',
+      description: '把地圖上另一個 session 多出來的對話（含工具呼叫）補進目前 session，對方保持原樣',
+      argumentHint: '[session id 前幾碼]',
+    })
     await loadFor($ as unknown as Api)
     await update($, mapCollapsedAtom, () => false)
     if ((await $.store.get(MAP_COLLAPSED_KEY)) === true) await update($, mapCollapsedAtom, () => true)
@@ -1341,6 +1433,68 @@ export const register: Register = on => {
     return { text: `原地分出子 session「${title}」…` }
   })
 
+  on('command.run', { command: 'merge' }, async ($, e) => {
+    const r = resolveMergeArg(await readGraph($), e.args)
+    if ('error' in r) return { text: r.error }
+    const job = await prepareMerge($, r.id)
+    if (typeof job === 'string') return { text: job }
+    await update($, mergeJobAtom, () => job)
+    $.clock.after(0, () => {
+      void $.ui.open({ id: MERGE, title: '併入 session', focus: true, closeOnEscape: true, holdToasts: true, rows: 12 })
+    })
+    return { text: `比對好了：「${job.name.slice(0, 30)}」有 ${job.prompts} 次提問是目前 session 沒有的，請在確認窗決定是否併入` }
+  })
+
+  // the merge dialog: Enter merges, Esc cancels
+  on('ui.render', { component: 'Pane', requestId: MERGE }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const job = await read($, mergeJobAtom)
+    if (!job) return <Text dimColor>（沒有等待確認的合併）</Text>
+    return (
+      <Box flexDirection="column">
+        <Text wrap="wrap">{`把「${job.name.slice(0, 40)}」多出來的 ${job.prompts} 次提問、${job.tools} 次工具呼叫補進目前 session？它本身保持原樣。`}</Text>
+        {job.preview.map((p, i) => (
+          <Text key={`p${i}`} dimColor wrap="truncate-end">{`  · ${p.replace(/\s+/g, ' ')}`}</Text>
+        ))}
+        {job.prompts > job.preview.length && <Text dimColor>{`  … 共 ${job.prompts} 次提問`}</Text>}
+        {job.trimmed && <Text color="yellow" wrap="wrap">⚠ 內容太長：較早的工具結果或對話會省略</Text>}
+        {job.otherCwd && <Text color="yellow" wrap="wrap">{`⚠ 它的工作目錄是 ${job.otherCwd}：它改過的檔案不在這裡`}</Text>}
+        {job.live && <Text color="yellow" wrap="wrap">⚠ 它還開在某個分頁：如果正在回答，最後一段可能還沒寫進紀錄</Text>}
+        <Box gap={1} marginTop={1}>
+          <Button key="yes" label="併入" variant="primary" hotkey="y" autoFocus onPress={() => answerMerge($ as unknown as Api, true)} />
+          <Button key="no" label="取消" hotkey="n" onPress={() => answerMerge($ as unknown as Api, false)} />
+        </Box>
+      </Box>
+    )
+  })
+
+  // a merge's row in the transcript: one line, unfolds to what was brought over
+  on('ui.render', { component: 'Placed' }, async ($, e, next) => {
+    if (e.props.plugin !== 'session-branch-control' || !e.props.id.startsWith(MERGE_ROW)) return next(e)
+    const id = e.props.id
+    const row = (await read($, mergeRowsAtom))[id]
+    if (!row) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const toggle = () => update($, mergeRowsAtom, v => (v[id] ? { ...v, [id]: { ...v[id]!, open: !v[id]!.open } } : v))
+    const head = (
+      <Box gap={1}>
+        <Button key="fold" plain label={row.open ? '[▾ 收合]' : '[▸ 展開]'} onPress={toggle} />
+        <Text color="magenta">⤳</Text>
+        <Text wrap="truncate-end">{`已從「${row.name}」補入 ${row.prompts} 次提問、${row.tools} 次工具呼叫`}</Text>
+      </Box>
+    )
+    if (!row.open) return head
+    const text = mergeTexts.get(id)
+    return (
+      <Box flexDirection="column">
+        {head}
+        <Text dimColor wrap="wrap">
+          {text ? (text.length > MERGE_SHOW_MAX ? `${text.slice(0, MERGE_SHOW_MAX)}\n…（只顯示前 ${MERGE_SHOW_MAX} 字）` : text) : '（內容只在併入的那次開啟期間可以看）'}
+        </Text>
+      </Box>
+    )
+  })
+
   // the delete dialog: Enter confirms, Esc cancels
   on('ui.render', { component: 'Pane', requestId: CONFIRM }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
@@ -1450,7 +1604,7 @@ export const register: Register = on => {
     const heavyRow = ({ s, prefix }: { s: SessionEntry; prefix: string }) => {
       const here = s.id === cur
       const gutter = here ? '▶ ' : '  '
-      const tail = `${s.fromTurn !== undefined ? ` #${s.fromTurn}` : ''}${s.tab && live.includes(s.tab) && !here ? ' ▣' : ''}${here ? ' 目前' : ''}`
+      const tail = `${s.fromTurn !== undefined ? ` #${s.fromTurn}` : ''}${s.mergedInto?.[cur] ? ' ⤳' : ''}${s.tab && live.includes(s.tab) && !here ? ' ▣' : ''}${here ? ' 目前' : ''}`
       const room = cols - cells(INDENT) - cells(gutter) - cells(prefix) - cells(tail)
       return (
         <Button key={`s-${s.id}`} plain onPress={() => update($, mapSelectedAtom, v => (v === s.id ? null : s.id))}>
@@ -1523,12 +1677,13 @@ export const register: Register = on => {
               <Box flexDirection="column" borderStyle="single" borderDimColor paddingX={1} marginLeft={2}>
                 <Text bold>{cut(nameOf(picked), cols - 6)}</Text>
                 <Text dimColor wrap="wrap">
-                  {`${picked.parentId ? `從「${(() => { const p = g.sessions[picked.parentId]; return p ? nameOf(p) : '?' })()}」第 ${picked.fromTurn ?? '?'} 輪分出` : '根 session'}${picked.fromBranch ? ' · 由輕分支升級' : ''}${picked.tab && live.includes(picked.tab) ? ' · ▣ 已開在分頁' : ''}${picked.id === cur ? ' · 你目前在這裡' : ''}`}
+                  {`${picked.parentId ? `從「${(() => { const p = g.sessions[picked.parentId]; return p ? nameOf(p) : '?' })()}」第 ${picked.fromTurn ?? '?'} 輪分出` : '根 session'}${picked.fromBranch ? ' · 由輕分支升級' : ''}${picked.tab && live.includes(picked.tab) ? ' · ▣ 已開在分頁' : ''}${picked.id === cur ? ' · 你目前在這裡' : ''}${picked.mergedInto?.[cur] ? ` · ⤳ 已併入目前 session（共 ${picked.mergedInto[cur]!.prompts} 次提問）` : ''}`}
                 </Text>
                 {picked.id !== cur && (
                   <Box flexDirection="column" marginTop={1}>
                     <Button key="m-tab" label="▣ 在新分頁開啟" onPress={() => void openInTab(($ as unknown as Api), picked.id)} />
                     <Button key="m-here" label="⇄ 切換成目前 session" onPress={() => void switchHere(($ as unknown as Api), picked.id)} />
+                    <Button key="m-merge" label="⤳ 併入目前 session" onPress={() => void fillMerge(($ as unknown as Api), picked.id)} />
                     <Button key="m-del" label="🗑 刪除" onPress={() => deleteHeavy(($ as unknown as Api), picked.id)} />
                   </Box>
                 )}

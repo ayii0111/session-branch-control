@@ -657,3 +657,115 @@ test('prompt numbers run through a compaction: a branch takes the count, 📍 sh
   await reader.unmount()
   await after.unmount()
 })
+
+test('merging a heavy branch brings over only what this session lacks, tool calls included, once', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  const session = mock.session(on)
+  const row = (o: Record<string, unknown>) => JSON.stringify({ isSidechain: false, cwd: '/w', ...o })
+  const shared = [
+    row({ type: 'user', uuid: 'u1', parentUuid: null, message: { role: 'user', content: 'shared start' } }),
+    row({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', message: { role: 'assistant', content: [{ type: 'text', text: 'shared answer' }] } }),
+  ]
+  const graphFile = '/h/.claude/session-branch-control/-w.json'
+  const files = new Map<string, string>([
+    [
+      graphFile,
+      JSON.stringify({
+        sessions: {
+          P: { id: 'P', title: 'main', parentId: null, createdAt: -1e9 },
+          K: { id: 'K', title: 'kid', parentId: 'P', createdAt: -1e9 },
+        },
+        pending: {},
+      }),
+    ],
+    ['/h/.claude/projects/-w/P.jsonl', `${[...shared, row({ type: 'user', uuid: 'p2', parentUuid: 'a1', message: { role: 'user', content: 'only in P' } })].join('\n')}\n`],
+    [
+      '/h/.claude/projects/-w/K.jsonl',
+      `${[
+        ...shared,
+        row({ type: 'user', uuid: 'u2', parentUuid: 'a1', message: { role: 'user', content: 'K question' } }),
+        row({
+          type: 'assistant',
+          uuid: 'a2',
+          parentUuid: 'u2',
+          message: { role: 'assistant', content: [{ type: 'text', text: 'let me look' }, { type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/w/x.ts' } }] },
+        }),
+        row({ type: 'user', uuid: 'r2', parentUuid: 'a2', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'FILE BODY' }] } }),
+        row({ type: 'assistant', uuid: 'a3', parentUuid: 'r2', message: { role: 'assistant', content: [{ type: 'text', text: 'K done' }] } }),
+      ].join('\n')}\n`,
+    ],
+  ])
+  const placed: string[] = []
+  const filled: string[] = []
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.place', (_, e) => {
+    placed.push(e.id)
+    return { value: { isPlaced: true, requestId: `req-${e.id}` } }
+  })
+  on('prompt.fill', (_, e) => {
+    filled.push(e.text)
+    return { isFilled: true }
+  })
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'P' }))
+  on('session.root', () => ({ value: '/w' }))
+  on('session.cwd', () => ({ value: '/w' }))
+  on('fs.exists', (_, e) => ({ value: files.has(e.path) }))
+  on('fs.read', (_, e) => {
+    const t = files.get(e.path)
+    if (t === undefined) throw new Error('ENOENT')
+    return { value: t }
+  })
+  on('fs.write', (_, e) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+
+  // ⤳ on the map primes the command; the person presses Enter
+  const pane = await $.ui.mount(PANE)
+  await pane.press({ key: 's-K' })
+  await pane.press({ key: 'm-merge' })
+  expect(filled).toEqual(['/merge K'])
+  await pane.unmount()
+
+  const r = await $.command.run({ command: 'merge', args: 'K' })
+  expect(r.text).toContain('1 次提問')
+  await clock.advance(10)
+  const dialog = await $.ui.mount({ ...PANE, requestId: 'sbc-merge' })
+  expect((await dialog.find({ type: 'Text', text: /補進目前 session/ }))?.text).toContain('1 次工具呼叫')
+  await dialog.press({ key: 'yes' })
+  await dialog.unmount()
+
+  const text = JSON.stringify(session.appended())
+  expect(text).toContain('K question')
+  expect(text).toContain('[工具 Read]')
+  expect(text).toContain('FILE BODY')
+  expect(text).toContain('K done')
+  expect(text).not.toContain('shared start')
+  expect(JSON.parse(files.get(graphFile)!).sessions.K.mergedInto.P.upto).toBe('a3')
+  // K itself is left as it was
+  expect(files.get('/h/.claude/projects/-w/K.jsonl')).toContain('K done')
+
+  // its row in the transcript unfolds to what was brought over
+  const id = placed.find(p => p.startsWith('merged-'))!
+  const shown = await $.ui.mount({
+    plugin: 'session-branch-control',
+    component: 'Placed',
+    requestId: `req-${id}`,
+    surface: 'terminal',
+    props: { id, plugin: 'session-branch-control' },
+  })
+  expect((await shown.find({ type: 'Text', text: /已從/ }))?.text).toContain('kid')
+  await shown.press({ key: 'fold' })
+  expect((await shown.find({ type: 'Text', text: /FILE BODY/ }))?.text).toContain('K done')
+  await shown.unmount()
+
+  // nothing new since: nothing to merge
+  expect((await $.command.run({ command: 'merge', args: 'K' })).text).toContain('沒有目前 session 還沒有的內容')
+})

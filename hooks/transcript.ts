@@ -13,7 +13,7 @@ import type { Api } from './graph'
 // NB: every helper that takes `$` is a function declaration: past an import
 // the engine follows `$` only into those.
 
-type Row = Record<string, unknown> & {
+export type Row = Record<string, unknown> & {
   type?: string
   uuid?: string
   parentUuid?: string | null
@@ -26,10 +26,10 @@ type Row = Record<string, unknown> & {
 }
 
 const META = ['ai-title', 'mode', 'permission-mode', 'session-owner', 'atis-latch']
-const CHAIN = ['user', 'assistant', 'system', 'attachment']
+export const CHAIN = ['user', 'assistant', 'system', 'attachment']
 
 /** cc keeps a session at ~/.claude/projects/<its folder, each non-alphanumeric as '-'>/<id>.jsonl */
-async function findTranscript($: Api, sessionId: string) {
+export async function findTranscript($: Api, sessionId: string) {
   const home = (await $.env.get('HOME')) ?? ''
   const dirs = new Set([await $.session.root(), await $.session.cwd()])
   for (const dir of dirs) {
@@ -70,7 +70,7 @@ export type PromptIndex = {
 }
 
 /** a prompt the person typed: no tool result, no command echo, reminder or compaction summary */
-const isPrompt = (r: Row) => {
+export const isPrompt = (r: Row) => {
   if (r.type !== 'user' || r.isSidechain === true || r.isMeta === true || r.isCompactSummary === true) return false
   const c = (r.message as { content?: unknown } | undefined)?.content
   if (typeof c === 'string') return c.trimStart() !== '' && !c.trimStart().startsWith('<')
@@ -170,7 +170,7 @@ export async function deleteSession($: Api, sessionId: string) {
   return removed
 }
 
-const parseRows = (text: string) => {
+export const parseRows = (text: string) => {
   const rows: Row[] = []
   for (const line of text.split('\n')) {
     if (!line.trim()) continue

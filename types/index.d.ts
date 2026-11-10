@@ -33,7 +33,34 @@ export type SessionEntry = {
   createdAt: number
   /** Orca terminal handle of the tab it is open in right now */
   tab?: string
+  /** merged into these sessions (by id): how far, so merging again brings only what came since */
+  mergedInto?: Record<string, MergeMark>
 }
+
+export type MergeMark = {
+  /** the newest row of this session's taken */
+  upto: string
+  at: number
+  /** prompts brought over, all merges together */
+  prompts: number
+}
+
+/** a merge waiting on its confirm dialog */
+export type MergeJob = {
+  from: string
+  name: string
+  upto: string
+  prompts: number
+  tools: number
+  preview: string[]
+  otherCwd: string | null
+  trimmed: boolean
+  /** open in a live tab: its newest turn may not be written yet */
+  live: boolean
+}
+
+/** a merge's row in the transcript: one line, unfolds to the record */
+export type MergeRow = { name: string; prompts: number; tools: number; open: boolean }
 
 /** the project's session map, one JSON file per project, shared by every process */
 export type Graph = {
@@ -77,6 +104,8 @@ declare module 'claude-code' {
       confirm: Shaped<{ id: string; name: string } | null>
       view: Shaped<{ at: number; total: number } | null>
       rewound: string[]
+      mergeJob: Shaped<MergeJob | null>
+      mergeRows: Shaped<Record<string, MergeRow>>
     }
   }
 }
