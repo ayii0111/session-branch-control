@@ -182,3 +182,96 @@ test('/q right after a resume (nothing to fork) answers from the saved transcrip
   expect(completes[0]).toContain('作品要做到什麼程度')
   expect(toasts.some(t => t.includes('支線回答好了'))).toBe(true)
 })
+
+test('upgrading writes the child transcript: the fork chain, then the branch as visible turns', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  const parent = [
+    { type: 'ai-title', aiTitle: 'T', sessionId: 'P' },
+    { type: 'user', uuid: 'old', parentUuid: null, isSidechain: false, sessionId: 'P', message: { role: 'user', content: 'before compact' } },
+    { type: 'system', subtype: 'compact_boundary', uuid: 'b', parentUuid: null, isSidechain: false, sessionId: 'P' },
+    { type: 'user', uuid: 'u1', parentUuid: 'b', isSidechain: false, sessionId: 'P', cwd: '/w', version: '9', message: { role: 'user', content: 'hi' } },
+    { type: 'assistant', uuid: 'a1', parentUuid: 'u1', isSidechain: false, sessionId: 'P', message: { model: 'm1', role: 'assistant', content: [] } },
+    { type: 'file-history-snapshot', messageId: 'u1', snapshot: {} },
+    { type: 'assistant', uuid: 'side', parentUuid: 'a1', isSidechain: true, sessionId: 'P' },
+  ]
+  const files = new Map<string, string>([['/h/.claude/projects/-w/P.jsonl', parent.map(r => JSON.stringify(r)).join('\n')]])
+  const copied: string[] = []
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.copy', (_, e) => {
+    copied.push(e.text)
+    return { value: { isCopied: true } }
+  })
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'P' }))
+  on('session.turns', () => ({ value: 2 }))
+  on('session.root', () => ({ value: '/w' }))
+  on('session.cwd', () => ({ value: '/w' }))
+  on('session.model', () => ({ value: 'm0' }))
+  on('session.messages', () => ({ value: [{ role: 'user', text: 'hi', toolUses: [] }] }))
+  on('fs.read', (_, e) => {
+    const t = files.get(e.path)
+    if (t === undefined) throw new Error('ENOENT')
+    return { value: t }
+  })
+  on('fs.write', (_, e) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
+  let n = 0
+  on('model.fork', () => ({
+    value: {
+      isAnswered: true,
+      text: `A${++n}`,
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    },
+  }))
+  const placed: string[] = []
+  on('ui.place', (_, e) => {
+    placed.push(e.id)
+    return { value: { isPlaced: true, requestId: `req-${e.id}` } }
+  })
+
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'q', args: 'Q1' })
+  await clock.advance(10)
+  await $.command.run({ command: 'wi', args: 'Q2' })
+  await clock.advance(10)
+  const row = placed.at(-1)!
+  const reader = await $.ui.mount({
+    plugin: 'session-branch-control',
+    component: 'Placed',
+    requestId: `req-${row}`,
+    surface: 'terminal',
+    props: { id: row, plugin: 'session-branch-control' },
+  })
+  await reader.press({ key: 'up-tab' })
+  await reader.unmount()
+
+  const child = [...files.keys()].find(k => k.startsWith('/h/.claude/projects/-w/') && !k.endsWith('/P.jsonl'))!
+  expect(child).toBeDefined()
+  const childId = child.split('/').at(-1)!.replace('.jsonl', '')
+  // the new tab resumes the written session, no fork at launch
+  expect(copied[0]).toContain(`'--resume' '${childId}'`)
+  expect(copied[0]).not.toContain('--fork-session')
+
+  const rows = files.get(child)!.trim().split('\n').map(l => JSON.parse(l))
+  expect(rows.every(r => r.sessionId === undefined || r.sessionId === childId)).toBe(true)
+  const chain = rows.filter(r => r.uuid)
+  // from the compact boundary on, no sidechain, no pre-compact rows
+  expect(chain.map(r => r.uuid).slice(0, 3)).toEqual(['b', 'u1', 'a1'])
+  expect(chain.length).toBe(7)
+  const [q1, a1, q2, a2] = chain.slice(3)
+  expect(q1.message.content).toBe('【支線追問】Q1')
+  expect(q1.parentUuid).toBe('a1')
+  expect(a1.message.content[0].text).toBe('A1')
+  expect(a1.message.model).toBe('m1')
+  expect(q2.message.content).toBe('【支線假設】Q2')
+  expect(q2.parentUuid).toBe(a1.uuid)
+  expect(a2.message.content[0].text).toBe('A2')
+  expect(rows.at(-1)).toEqual({ type: 'last-prompt', lastPrompt: 'Q2', leafUuid: a2.uuid, sessionId: childId })
+  expect(rows.some(r => r.type === 'file-history-snapshot')).toBe(true)
+})

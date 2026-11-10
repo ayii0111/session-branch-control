@@ -16,6 +16,7 @@ import {
   switchTab,
   titleOfCurrent,
 } from './graph'
+import { writeBranchTranscript } from './transcript'
 
 const graphAtom = atom({ plugin: 'session-branch-control', key: 'graph' } as const, { sessions: {}, pending: {} } as Graph, {
   shape: 'graph-1',
@@ -326,8 +327,51 @@ const upgradeNode = async ($: Api, id: string, where: 'here' | 'tab') => {
     $.ui.toast('這條支線還沒有完成的回答，不能升級')
     return
   }
+  // first choice: write the child's transcript with the branch as real turns;
+  // cc's own fork (record hidden, shown in the reader) when that cannot be done
+  if (await upgradeWritten($, id, spec, where)) return
   if (where === 'here') await forkHere($, spec)
   else await forkToTab($, await $.session.id(), spec)
+}
+
+/**
+ * Upgrade by writing the child session's transcript first: the branch's
+ * questions and answers are ordinary turns in it, visible and kept, then
+ * open it (`/resume` here, or `claude --resume` in a new tab).
+ */
+const upgradeWritten = async ($: Api, nodeId: string, spec: ForkSpec, where: 'here' | 'tab') => {
+  const parentId = await $.session.id()
+  const chain = chainOf(await read($, nodesAtom), nodeId).filter(n => n.status === 'done')
+  const child = crypto.randomUUID()
+  let ok = false
+  try {
+    ok = await writeBranchTranscript($, parentId, child, spec.title, chain)
+  } catch (err) {
+    $.ui.log(`writing the branch transcript failed: ${String((err as Error)?.message ?? err)}`, { to: 'debug' })
+  }
+  if (!ok) return false
+  const now = await $.clock.now()
+  const parentTitle = await titleOfCurrent($)
+  await mutate($, g => {
+    ensureEntry(g, parentId, parentTitle, now)
+    g.sessions[child] = { id: child, title: spec.title, parentId, fromTurn: spec.fromTurn, createdAt: now, fromBranch: nodeId }
+  })
+  await seedChild($, child, parentId, nodeId)
+  await markUpgraded($, parentId, nodeId, child)
+  if (where === 'tab') {
+    const handle = await openTab($, `⑂ ${spec.title}`, ['--resume', child])
+    if (handle) {
+      await mutate($, g => {
+        const s = g.sessions[child]
+        if (s) s.tab = handle
+      })
+    }
+    await syncSelf($)
+  } else {
+    $.ui.toast(`原地切到重支線：${spec.title}`)
+    await $.command.run({ command: 'resume', args: child })
+  }
+  return true
 }
 
 const removeNode = async ($: Api, id: string) => {
@@ -919,7 +963,7 @@ export const register: Register = on => {
     if (!spec) return { text: '先在脈絡樹選中一條已經回答完的輕支線，再用 /up' }
     // a command hook may not run another command itself: detach
     $.clock.after(0, () => {
-      void forkHere($, spec)
+      void upgradeNode($, sel!, 'here')
     })
     return { text: `升級中：原地分出重支線「${spec.title}」…` }
   })
@@ -928,9 +972,8 @@ export const register: Register = on => {
     const sel = await read($, selectedAtom)
     const spec = sel ? await upgradeSpec($, sel) : undefined
     if (!spec) return { text: '先在脈絡樹選中一條已經回答完的輕支線，再用 /up-tab' }
-    const cur = await $.session.id()
     $.clock.after(0, () => {
-      void forkToTab($, cur, spec)
+      void upgradeNode($, sel!, 'tab')
     })
     return { text: `升級中：在新分頁開出重支線「${spec.title}」…` }
   })
