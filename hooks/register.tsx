@@ -472,17 +472,24 @@ const removeNode = async ($: Api, id: string) => {
   await persist($)
 }
 
-/** ↳ follow up on `id`: new /q questions hang under it, the prompt is primed */
+/** ↳ follow up on `id`: it becomes /qf's target, the prompt is primed */
 const followUp = async ($: Api, id: string) => {
   await update($, selectedAtom, () => id)
-  const filled = await $.prompt.fill({ text: '/q ' }).catch(() => undefined)
-  if (!filled?.isFilled) $.ui.toast('已選中這個節點：輸入 /q <問題> 接著追問')
+  const filled = await $.prompt.fill({ text: '/qf ' }).catch(() => undefined)
+  if (!filled?.isFilled) $.ui.toast('已選中這個節點：輸入 /qf <問題> 接著追問')
 }
 
-const ask = async ($: Api, kind: BranchKind, text: string) => {
+/** the branch /qf follows up on: the selected one, else the one last read */
+const followTarget = async ($: Api) => {
   const nodes = await read($, nodesAtom)
   const sel = await read($, selectedAtom)
-  const parentId = sel && nodes.some(n => n.id === sel) ? sel : null
+  const recent = await read($, recentAtom)
+  return [sel, recent].find(id => id && nodes.some(n => n.id === id)) ?? null
+}
+
+/** `parentId` null: a question on the session itself (/q); else a follow-up under that branch (/qf) */
+const ask = async ($: Api, kind: BranchKind, text: string, parentId: string | null) => {
+  const nodes = await read($, nodesAtom)
   const chain = chainOf(nodes, parentId)
   const node: BranchNode = {
     id: newId(),
@@ -885,7 +892,8 @@ const refreshNames = async ($: Api, g: Graph, cur: string) => {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'q', description: '開輕分支：追問概念或「如果改成…會怎樣」（答案只進閱讀區，不進主線）', argumentHint: '[問題]' })
+    await $.command.register({ name: 'q', description: '開輕分支：針對目前 session 追問概念或「如果改成…會怎樣」（答案只進閱讀區，不進主線）', argumentHint: '[問題]' })
+    await $.command.register({ name: 'qf', description: '接著選中（或最後看過）的輕分支追問，帶著那條支線的問答', argumentHint: '[問題]' })
     await $.command.register({ name: 'tree', description: '打開脈絡樹面板並聚焦' })
     await $.command.register({ name: 't', description: '快速開合脈絡樹面板（對話進行中也能用）', immediate: true })
     await $.command.register({ name: 'r', description: '開合支線閱讀區（全寬顯示選中支線的問答；收合時捲回原處）', immediate: true })
@@ -1011,7 +1019,7 @@ export const register: Register = on => {
           </Box>
           <Text bold wrap="wrap">{label}</Text>
           <Text dimColor wrap="wrap">
-            {`從主線第 ${node.turn} 輪分出 · 新的 /q 會接在這個節點底下${status}${marks}`}
+            {`從主線第 ${node.turn} 輪分出 · /qf 會接在這個節點底下${status}${marks}`}
           </Text>
           <Box marginTop={1} flexDirection="column">
             {node.status === 'pending' ? <Text dimColor>回答中…</Text> : <Markdown text={node.answer || '（空）'} />}
@@ -1116,8 +1124,19 @@ export const register: Register = on => {
   on('command.run', { command: 'q' }, async ($, e) => {
     const text = e.args.trim()
     if (!text) return { text: '用法：/q <想追問的概念，或「如果改成…會怎樣」>' }
-    await ask($, 'q', text)
+    // always on the session itself, never on a light branch (that is /qf)
+    await ask($, 'q', text, null)
     return { text: '支線已開，答案會出現在下方的 📖 閱讀區' }
+  })
+
+  on('command.run', { command: 'qf' }, async ($, e) => {
+    const text = e.args.trim()
+    if (!text) return { text: '用法：/qf <問題>：接著選中（或最後看過）的輕分支追問' }
+    const target = await followTarget($)
+    if (!target) return { text: '沒有可以接著追問的輕分支：先用 /q 開一條，或在側欄點選一條' }
+    const parent = (await read($, nodesAtom)).find(n => n.id === target)
+    await ask($, 'q', text, target)
+    return { text: `接著「${(parent?.text ?? '').slice(0, 30)}」追問，答案會出現在下方的 📖 閱讀區` }
   })
 
   on('command.run', { command: 'tree' }, async $ => {
@@ -1291,7 +1310,7 @@ export const register: Register = on => {
       )
     }
 
-    const mainLabel = sel ? '（點此回到主線底下）' : '← 新的 /q 接在這'
+    const mainLabel = '← /q 都從這裡分出'
     return (
       <Box flexDirection="column" minHeight={dock ? bodyRows : undefined}>
         {section('light-toggle', !lightCollapsed, `輕分支 · 這個 session 的追問（${nodes.length}）`, toggleLight)}
@@ -1332,7 +1351,7 @@ export const register: Register = on => {
             {current && (
               <Box paddingLeft={2}>
                 <Text dimColor wrap="wrap">
-                  {readerOpen && reader.node === current.id ? '📖 內容在對話下方的閱讀區' : '📖 點節點，在對話下方全寬閱讀'}
+                  {readerOpen && reader.node === current.id ? '📖 內容在對話中提問處的閱讀區' : '📖 點節點，捲到它在對話中的閱讀區'}
                 </Text>
               </Box>
             )}

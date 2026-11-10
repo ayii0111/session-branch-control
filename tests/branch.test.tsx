@@ -48,7 +48,7 @@ test('/q opens a branch, its answer lands in the full-width reader, merge writes
   await $.command.run({ command: 'q', args: 'CRDT 是什麼' })
   await clock.advance(10)
   // follow-up under the selected node carries the chain
-  await $.command.run({ command: 'q', args: '若改用 OT' })
+  await $.command.run({ command: 'qf', args: '若改用 OT' })
   await clock.advance(10)
 
   expect(forks.length).toBe(2)
@@ -238,7 +238,7 @@ test('upgrading writes the child transcript: the fork chain, then the branch as 
   await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
   await $.command.run({ command: 'q', args: 'Q1' })
   await clock.advance(10)
-  await $.command.run({ command: 'q', args: 'Q2' })
+  await $.command.run({ command: 'qf', args: 'Q2' })
   await clock.advance(10)
   const row = placed.at(-1)!
   const reader = await $.ui.mount({
@@ -356,17 +356,16 @@ test('light branches list newest first and mark the one last read; ↳ primes a 
   await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
   await $.command.run({ command: 'q', args: 'first' })
   await clock.advance(10)
-  // back to the main thread, so the next one is a sibling, not a follow-up
-  let pane = await $.ui.mount(PANE)
-  await pane.press({ key: 'main' })
-  await pane.unmount()
+  // /q always asks the session itself: a sibling, never a follow-up
   await $.command.run({ command: 'q', args: 'second' })
   await clock.advance(10)
 
-  pane = await $.ui.mount(PANE)
+  let pane = await $.ui.mount(PANE)
   const branchRows = async () => (await pane.findAll({ type: 'Button' })).filter(b => /\? (first|second)/.test(b.text ?? ''))
   let rows = await branchRows()
   expect(rows.map(b => (b.text ?? '').includes('second'))).toEqual([true, false])
+  // same depth: neither hangs under the other
+  expect(rows.every(b => /^\s*└ |^\s*├ /.test(b.text ?? ''))).toBe(true)
 
   // each /q placed its own row where it was asked
   expect(placed.length).toBe(2)
@@ -393,7 +392,7 @@ test('light branches list newest first and mark the one last read; ↳ primes a 
     props: { id: row, plugin: 'session-branch-control' },
   })
   await reader.press({ key: 'follow' })
-  expect(filled).toEqual(['/q '])
+  expect(filled).toEqual(['/qf '])
   // delete: gone from the tree, the mark and the reader
   await reader.press({ key: 'del' })
   await reader.unmount()
