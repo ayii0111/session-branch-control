@@ -250,6 +250,7 @@ const openReader = async ($: Api, nodeId: string, jump: boolean) => {
   const r = await read($, readerAtom)
   const reuse = r.row !== null && r.req !== null && placedAtSeq === seq
   const back = jump ? (reuse && r.open && r.back ? r.back : topVisible()) : r.back
+  if (jump) await trace($, `openReader jump node=${nodeId} reuse=${reuse} back=${back} ${seenSummary()}`)
   if (reuse) {
     await update($, readerAtom, v => ({ ...v, node: nodeId, open: true, back }))
   } else {
@@ -262,18 +263,19 @@ const openReader = async ($: Api, nodeId: string, jump: boolean) => {
   }
   if (jump) {
     const req = (await read($, readerAtom)).req
-    if (req) await scrollTo($, req)
+    if (req) await scrollTo($, req, 'to-reader')
   }
 }
 
 /** bring a transcript row to the viewport's top; a refusal is told, never thrown */
-const scrollTo = async ($: Api, requestId: string) => {
+const scrollTo = async ($: Api, requestId: string, why0 = '') => {
   let why: string | undefined
   try {
     why = (await $.ui.scroll({ to: { requestId }, block: 'start' })).deny
   } catch (err) {
     why = String((err as Error)?.message ?? err)
   }
+  await trace($, `scroll ${why0} → ${requestId}: ${why ? `DENY ${why}` : 'ok'}`)
   if (!why) return
   // every refusal goes to the debug log; the person hears each kind once
   $.ui.log(`scroll to ${requestId} refused: ${why}`, { to: 'debug' })
@@ -286,7 +288,32 @@ const scrollDenied = new Set<string>()
 /** back to the message that was at the top before the reader was jumped to */
 const goBack = async ($: Api) => {
   const back = (await read($, readerAtom)).back
-  if (back) await scrollTo($, back)
+  await trace($, `goBack back=${back}`)
+  if (back) await scrollTo($, back, 'back')
+}
+
+/**
+ * Diagnostics while the scroll behaviour is being verified on a real
+ * terminal: one line per step into ~/.claude/session-branch-control/trace.log
+ * (the last 200 lines kept). Never throws.
+ */
+const trace = async ($: Api, line: string) => {
+  try {
+    const path = `${(await $.env.get('HOME')) ?? '/tmp'}/.claude/session-branch-control/trace.log`
+    let old = ''
+    try {
+      old = await $.fs.read(path)
+    } catch {}
+    const at = new Date(await $.clock.now()).toISOString().slice(11, 19)
+    const lines = `${old}${at} ${line}\n`.split('\n').filter(Boolean).slice(-200)
+    await $.fs.write(path, `${lines.join('\n')}\n`)
+  } catch {}
+}
+
+/** what the transcript tracking holds right now, for the trace */
+const seenSummary = () => {
+  const showing = [...seen].filter(([, s]) => s.on).map(([id, s]) => `${id.slice(0, 8)}#${s.n}[${s.on!.first}-${s.on!.last}/${s.on!.of}]`)
+  return `seen=${seen.size} showing=${showing.length} ${showing.slice(0, 8).join(' ')}`
 }
 
 const foldReader = async ($: Api) => {
