@@ -969,8 +969,16 @@ export const register: Register = on => {
     const mark = (n: BranchNode) =>
       n.status === 'pending' ? ' …' : n.status === 'error' ? ' ✗' : n.upgradedTo ? ' ⇪' : n.merged ? ' ⤴' : ''
 
+    // the collapse button is pinned to the window's bottom-left while docked:
+    // the tree is at least the window tall, the button drawn absolutely on the
+    // window's last row, which follows the person's scroll (each scroll redraws)
+    const dock = e.props.placement === 'dock'
+    const { offset, bodyRows } = e.props.scroll
+    const footerTop = offset + Math.max(1, bodyRows) - 1
+    const collapseButton = <Button key="collapse" label="⇥ 收合" hotkey="x" onPress={() => void closePane($ as unknown as Api)} />
+
     return (
-      <Box flexDirection="column">
+      <Box flexDirection="column" minHeight={dock ? bodyRows : undefined}>
         {hasMap && (
           <Box flexDirection="column" marginBottom={1}>
             <Box justifyContent="space-between">
@@ -978,10 +986,7 @@ export const register: Register = on => {
                 <Text bold>{`🗺 Session 地圖（${famRows.length}）`}</Text>
                 <Text dimColor>{mapCollapsed ? '  [+ 展開]' : '  [− 收合]'}</Text>
               </Button>
-              <Box gap={1}>
-                {rows.length > 0 && readerButton('reader')}
-                <Button key="collapse" label="⇥ 收合" hotkey="x" onPress={() => void closePane($ as unknown as Api)} />
-              </Box>
+              {rows.length > 0 && readerButton('reader')}
             </Box>
             {!mapCollapsed &&
               famRows.map(({ s, prefix }) => (
@@ -1028,12 +1033,7 @@ export const register: Register = on => {
             <Text bold={!sel} inverse={!sel}>{`● ${hasMap && curTitle ? cut(curTitle, Math.max(8, width - 24)) : '主線'}`}</Text>
             <Text dimColor>{sel ? '  （點此回主線）' : '  ← 你在這裡'}</Text>
           </Button>
-          {!hasMap && (
-            <Box gap={1}>
-              {rows.length > 0 && readerButton('reader')}
-              <Button key="collapse" label="⇥ 收合" hotkey="x" onPress={() => void closePane($ as unknown as Api)} />
-            </Box>
-          )}
+          {!hasMap && rows.length > 0 && readerButton('reader')}
         </Box>
         {rows.length === 0 && (
           <Text dimColor wrap="wrap">
@@ -1060,6 +1060,17 @@ export const register: Register = on => {
               ? '📖 內容在對話下方的閱讀區（/r 收合並捲回原處）'
               : '📖 點節點或按「閱讀」在對話下方全寬閱讀'}
           </Text>
+        )}
+        {/* docked: a blank last row, so the end of the list scrolls clear of the pinned button */}
+        {dock && <Box height={1} />}
+        {dock ? (
+          <Box position="absolute" top={footerTop} left={0} width={e.props.bodyColumns}>
+            {collapseButton}
+            {/* spaces paint over the row beneath, so the button never sits on text */}
+            <Text wrap="truncate-end">{' '.repeat(e.props.bodyColumns)}</Text>
+          </Box>
+        ) : (
+          <Box marginTop={1}>{collapseButton}</Box>
         )}
       </Box>
     )
