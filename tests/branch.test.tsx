@@ -312,7 +312,7 @@ test('the sidebar shows both systems, marks the session you are in, folds each, 
   expect(here?.text).toContain('▶')
   expect(here?.text).toContain('目前')
 
-  const cellsOf = (s: string) => [...s].reduce((w, ch) => w + ((ch.codePointAt(0) ?? 0) >= 0x2e80 ? 2 : 1), 0)
+  const cellsOf = (s: string) => [...s].reduce((w, ch) => w + ((ch.codePointAt(0) ?? 0) >= 0x2190 && !((ch.codePointAt(0) ?? 0) >= 0x2500 && (ch.codePointAt(0) ?? 0) <= 0x259f) ? 2 : 1), 0)
   for (const b of await pane.findAll({ type: 'Button' })) {
     if (b.key === 'collapse' || b.key === 'reader') continue
     expect(cellsOf(b.text ?? '')).toBeLessThanOrEqual(30)

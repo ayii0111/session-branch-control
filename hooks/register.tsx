@@ -70,8 +70,14 @@ const togglePane = async ($: Api) => {
   return !isUp
 }
 
-/** terminal cells a string takes: wide (CJK, full-width, emoji) count two */
+/**
+ * terminal cells a string takes: wide (CJK, full-width, emoji) count two, and
+ * so do symbols whose width fonts disagree on (arrows, ⑂, ●, ▶): counted
+ * wide, a row is cut a little short rather than wrapped
+ */
 const charCells = (cp: number) =>
+  (cp >= 0x2190 && cp <= 0x24ff) ||
+  (cp >= 0x25a0 && cp <= 0x2bff) ||
   (cp >= 0x1100 && cp <= 0x115f) ||
   (cp >= 0x2e80 && cp <= 0xa4cf) ||
   (cp >= 0xac00 && cp <= 0xd7a3) ||
@@ -908,7 +914,7 @@ export const register: Register = on => {
     const room = e.props.bodyColumns - cells('🌳 ') - cells(info) - cells(treeLabel) - (nodes.length > 0 ? cells(readerLabel) + 1 : 0) - 1
     return (
       <Box gap={1}>
-        <Button key="expand" onPress={() => void openPane($ as unknown as Api)}>
+        <Button key="expand" plain onPress={() => void openPane($ as unknown as Api)}>
           <Text>🌳 </Text>
           <Text dimColor>{info}</Text>
           <Text>{cut(where, Math.max(6, room))}</Text>
@@ -1084,7 +1090,7 @@ export const register: Register = on => {
     const cols = Math.max(16, e.props.bodyColumns - 1)
     const INDENT = '  '
     const section = (key: string, open: boolean, label: string, onPress: () => void) => (
-      <Button key={key} onPress={onPress}>
+      <Button key={key} plain onPress={onPress}>
         <Text>{open ? '▾ ' : '▸ '}</Text>
         <Text bold>{cut(label, cols - 2)}</Text>
       </Button>
@@ -1099,7 +1105,7 @@ export const register: Register = on => {
       const tail = `${s.fromTurn !== undefined ? ` #${s.fromTurn}` : ''}${s.tab && live.includes(s.tab) && !here ? ' ▣' : ''}${here ? ' 目前' : ''}`
       const room = cols - cells(INDENT) - cells(gutter) - cells(prefix) - cells(tail)
       return (
-        <Button key={`s-${s.id}`} onPress={() => update($, mapSelectedAtom, v => (v === s.id ? null : s.id))}>
+        <Button key={`s-${s.id}`} plain onPress={() => update($, mapSelectedAtom, v => (v === s.id ? null : s.id))}>
           <Text>{INDENT}</Text>
           <Text color="green" bold>{gutter}</Text>
           <Text dimColor>{prefix}</Text>
@@ -1117,7 +1123,7 @@ export const register: Register = on => {
         {section('light-toggle', !lightCollapsed, `輕分支 · 這個 session 的追問（${nodes.length}）`, toggleLight)}
         {!lightCollapsed && (
           <Box flexDirection="column">
-            <Button key="main" onPress={goMain}>
+            <Button key="main" plain onPress={goMain}>
               <Text>{INDENT}</Text>
               <Text bold={!sel} inverse={!sel}>● 主線</Text>
               <Text dimColor>{` ${cut(mainLabel, cols - cells(INDENT) - 7)}`}</Text>
@@ -1126,7 +1132,7 @@ export const register: Register = on => {
               const tail = ` #${node.turn}${mark(node)}`
               const room = cols - cells(INDENT) - cells(prefix) - cells(tail)
               return (
-                <Button key={node.id} onPress={select(node.id)}>
+                <Button key={node.id} plain onPress={select(node.id)}>
                   <Text>{INDENT}</Text>
                   <Text dimColor>{prefix}</Text>
                   <Text bold={node.id === sel} inverse={node.id === sel} dimColor={!onPath.has(node.id) && node.status === 'done'}>
