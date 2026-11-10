@@ -221,7 +221,15 @@ let seq = 0
 /** `seq` when the reader row was placed: a row is reused while nothing new came after it */
 let placedAtSeq = -1
 
+/**
+ * A transcript message's requestId is its uuid (the transcript file's): only
+ * those are tracked. The prompt's empty-state row draws as a UserMessage
+ * under `placeholder`, always on screen, and nothing scrolls to it.
+ */
+const isMessageId = (id: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-/.test(id)
+
 const track = (requestId: string, on: Seen['on']) => {
+  if (!isMessageId(requestId)) return
   const s = seen.get(requestId)
   if (s) s.on = on
   else seen.set(requestId, { n: ++seq, on })
