@@ -237,17 +237,24 @@ const track = (requestId: string, on: Seen['on']) => {
   else seen.set(requestId, { n: ++seq, on })
 }
 
-/** the message at the viewport's top edge: the one cut at its top, else the earliest showing */
+/**
+ * Where to come back to: the earliest message whose head is in the viewport.
+ * Scrolling it to the top lands within the few rows of the message above it
+ * that showed, where the message cut at the top edge would land at its own
+ * head, possibly far above. One message filling the whole viewport (no head
+ * showing) is the only answer then.
+ */
 const topVisible = () => {
+  let head: [string, Seen] | undefined
   let cut: [string, Seen] | undefined
-  let first: [string, Seen] | undefined
   for (const entry of seen) {
     const on = entry[1].on
     if (!on) continue
-    if (on.first > 0 && (!cut || entry[1].n < cut[1].n)) cut = entry
-    if (!first || entry[1].n < first[1].n) first = entry
+    if (on.first === 0) {
+      if (!head || entry[1].n < head[1].n) head = entry
+    } else if (!cut || entry[1].n < cut[1].n) cut = entry
   }
-  return (cut ?? first)?.[0] ?? null
+  return (head ?? cut)?.[0] ?? null
 }
 
 /**
