@@ -48,7 +48,7 @@ test('/q opens a branch, its answer lands in the full-width reader, merge writes
   await $.command.run({ command: 'q', args: 'CRDT 是什麼' })
   await clock.advance(10)
   // follow-up under the selected node carries the chain
-  await $.command.run({ command: 'wi', args: '若改用 OT' })
+  await $.command.run({ command: 'q', args: '若改用 OT' })
   await clock.advance(10)
 
   expect(forks.length).toBe(2)
@@ -238,7 +238,7 @@ test('upgrading writes the child transcript: the fork chain, then the branch as 
   await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
   await $.command.run({ command: 'q', args: 'Q1' })
   await clock.advance(10)
-  await $.command.run({ command: 'wi', args: 'Q2' })
+  await $.command.run({ command: 'q', args: 'Q2' })
   await clock.advance(10)
   const row = placed.at(-1)!
   const reader = await $.ui.mount({
@@ -269,7 +269,7 @@ test('upgrading writes the child transcript: the fork chain, then the branch as 
   expect(q1.parentUuid).toBe('a1')
   expect(a1.message.content[0].text).toBe('A1')
   expect(a1.message.model).toBe('m1')
-  expect(q2.message.content).toBe('【支線假設】Q2')
+  expect(q2.message.content).toBe('【支線追問】Q2')
   expect(q2.parentUuid).toBe(a1.uuid)
   expect(a2.message.content[0].text).toBe('A2')
   expect(rows.at(-1)).toEqual({ type: 'last-prompt', lastPrompt: 'Q2', leafUuid: a2.uuid, sessionId: childId })

@@ -137,8 +137,11 @@ const descendantsOf = (nodes: readonly BranchNode[], id: string): Set<string> =>
   return out
 }
 
+// /wi was folded into /q: `wi` stays a kind only so branches saved before still read
 const KIND_RULE: Record<BranchKind, string> = {
-  q: '類型：概念說明。針對主線對話中出現、用戶不熟的概念，用白話解釋它是什麼，並點出它在目前主線脈絡裡扮演什麼角色。',
+  q:
+    '類型：旁支追問。若是在問主線中出現、用戶不熟的概念，用白話解釋它是什麼，並點出它在目前主線脈絡裡扮演什麼角色；' +
+    '若是在問「如果換成某個情境或前提會怎樣」，就推演主線先前的論述哪些仍成立、哪些會翻轉、關鍵原因是什麼。',
   wi: '類型：假設推演。用戶想知道「若換成下列情境或前提」，主線先前的論述與後續推論會怎麼變：哪些結論仍成立、哪些會翻轉、關鍵原因是什麼。',
 }
 
@@ -823,8 +826,7 @@ const removeFromMap = async ($: Api, id: string) => {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'q', description: '開支線：追問一個概念（答案只進側欄，不進主線）', argumentHint: '[問題]' })
-    await $.command.register({ name: 'wi', description: '開支線：假設推演 what-if（答案只進側欄，不進主線）', argumentHint: '[假設情境]' })
+    await $.command.register({ name: 'q', description: '開輕分支：追問概念或「如果改成…會怎樣」（答案只進閱讀區，不進主線）', argumentHint: '[問題]' })
     await $.command.register({ name: 'tree', description: '打開脈絡樹面板並聚焦' })
     await $.command.register({ name: 't', description: '快速開合脈絡樹面板（對話進行中也能用）', immediate: true })
     await $.command.register({ name: 'r', description: '開合支線閱讀區（全寬顯示選中支線的問答；收合時捲回原處）', immediate: true })
@@ -872,7 +874,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'r' }, async $ => {
     const opened = await toggleReader($)
-    if (opened === null) return { text: '還沒有輕支線可以讀。先用 /q 或 /wi 開一條' }
+    if (opened === null) return { text: '還沒有輕支線可以讀。先用 /q 開一條' }
     return { text: opened ? '📖 閱讀區已打開' : '📖 閱讀區已收合，捲回原處' }
   })
 
@@ -950,7 +952,7 @@ export const register: Register = on => {
           </Box>
           <Text bold wrap="wrap">{label}</Text>
           <Text dimColor wrap="wrap">
-            {`從主線第 ${node.turn} 輪分出 · 新的 /q、/wi 會接在這個節點底下${status}${marks}`}
+            {`從主線第 ${node.turn} 輪分出 · 新的 /q 會接在這個節點底下${status}${marks}`}
           </Text>
           <Box marginTop={1} flexDirection="column">
             {node.status === 'pending' ? <Text dimColor>回答中…</Text> : <Markdown text={node.answer || '（空）'} />}
@@ -1051,15 +1053,8 @@ export const register: Register = on => {
 
   on('command.run', { command: 'q' }, async ($, e) => {
     const text = e.args.trim()
-    if (!text) return { text: '用法：/q <想追問的概念>' }
+    if (!text) return { text: '用法：/q <想追問的概念，或「如果改成…會怎樣」>' }
     await ask($, 'q', text)
-    return { text: '支線已開，答案會出現在下方的 📖 閱讀區' }
-  })
-
-  on('command.run', { command: 'wi' }, async ($, e) => {
-    const text = e.args.trim()
-    if (!text) return { text: '用法：/wi <假設情境>' }
-    await ask($, 'wi', text)
     return { text: '支線已開，答案會出現在下方的 📖 閱讀區' }
   })
 
@@ -1244,7 +1239,7 @@ export const register: Register = on => {
             })}
             {rows.length === 0 && (
               <Box paddingLeft={2}>
-                <Text dimColor wrap="wrap">還沒有輕分支。/q 追問概念、/wi 假設推演</Text>
+                <Text dimColor wrap="wrap">還沒有輕分支。用 /q 追問概念或假設情境</Text>
               </Box>
             )}
             {current && (
