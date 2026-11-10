@@ -516,3 +516,76 @@ test('sessions whose transcript is gone leave the map; a young one and the curre
   expect(g.sessions.kid.parentId).toBe('P')
   expect(g.pending).toEqual({})
 })
+
+test('prompt numbers run through a compaction: a branch takes the count, 📍 shows where the screen is', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  const u = (n: number) => `0000000${n}-0000-4000-8000-000000000000`
+  const row = (o: Record<string, unknown>) => JSON.stringify({ isSidechain: false, sessionId: 'S', ...o })
+  const prompt = (n: number, parent: string | null, text: string) => row({ type: 'user', uuid: u(n), parentUuid: parent, message: { role: 'user', content: text } })
+  const reply = (n: number, parent: string) => row({ type: 'assistant', uuid: u(n), parentUuid: parent, message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } })
+  const lines = [
+    prompt(1, null, 'first'),
+    reply(2, u(1)),
+    row({ type: 'user', uuid: u(3), parentUuid: u(2), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: 'x' }] } }),
+    prompt(4, u(3), 'second'),
+    reply(5, u(4)),
+    // the compaction: a boundary leading back, its summary, then on
+    row({ type: 'system', subtype: 'compact_boundary', uuid: u(6), parentUuid: null, logicalParentUuid: u(5) }),
+    row({ type: 'user', uuid: u(7), parentUuid: u(6), isCompactSummary: true, message: { role: 'user', content: 'summary' } }),
+    prompt(8, u(7), '<command-name>/q</command-name>'),
+    prompt(9, u(8), 'third'),
+    reply(10, u(9)),
+  ]
+  const files = new Map([['/h/.claude/projects/-w/S.jsonl', `${lines.join('\n')}\n`]])
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.close', () => ({ value: undefined }))
+  on('ui.place', (_, e) => ({ value: { isPlaced: true, requestId: `req-${e.id}` } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'S' }))
+  on('session.root', () => ({ value: '/w' }))
+  on('session.cwd', () => ({ value: '/w' }))
+  on('session.turns', () => ({ value: 99 }))
+  on('ui.panes', () => ({ value: [] }))
+  on('fs.exists', (_, e) => ({ value: files.has(e.path) }))
+  on('fs.read', (_, e) => {
+    const t = files.get(e.path)
+    if (t === undefined) throw new Error('ENOENT')
+    return { value: t }
+  })
+  on('fs.write', () => ({ value: undefined }))
+  on('model.fork', () => ({
+    value: { isAnswered: true, text: 'A', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+  }))
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'q', args: 'Q' })
+  await clock.advance(10)
+
+  // 3 prompts (a tool result, a command echo and the summary are none), counted across the compaction
+  const pane = await $.ui.mount(PANE)
+  const q = (await pane.findAll({ type: 'Button' })).find(b => /\? Q/.test(b.text ?? ''))
+  expect(q?.text).toContain('#3')
+  await pane.unmount()
+
+  // the screen's top shows the reply to the second prompt
+  const msg = await $.ui.mount({
+    plugin: 'session-branch-control',
+    component: 'AssistantMessage',
+    requestId: u(5),
+    surface: 'terminal',
+    props: { onScreen: { first: 0, last: 3, of: 4 } },
+  } as never)
+  await msg.unmount()
+  await clock.advance(100)
+  const band = await $.ui.mount({
+    plugin: 'session-branch-control',
+    component: 'AbovePrompt',
+    surface: 'terminal',
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  })
+  expect((await band.findAll({ type: 'Text' })).map(t => t.text).join('|')).toContain('📍 2/3')
+  await band.unmount()
+})

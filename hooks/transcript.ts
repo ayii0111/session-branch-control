@@ -20,6 +20,9 @@ type Row = Record<string, unknown> & {
   isSidechain?: boolean
   messageId?: string
   message?: unknown
+  isMeta?: boolean
+  isCompactSummary?: boolean
+  logicalParentUuid?: string | null
 }
 
 const META = ['ai-title', 'mode', 'permission-mode', 'session-owner', 'atis-latch']
@@ -46,6 +49,64 @@ export async function sessionExists($: Api, sessionId: string) {
     if (await $.fs.exists(`${home}/.claude/projects/${dir.replace(/[^A-Za-z0-9]/g, '-')}/${sessionId}.jsonl`)) return true
   }
   return false
+}
+
+/**
+ * Where each message of the live conversation stands: the prompt it belongs to
+ * (1 = the person's first prompt). Counted along the path from the newest row
+ * back to the first, through compactions (a boundary's `logicalParentUuid`
+ * leads on into the rows it summarized, which the file keeps), so the count
+ * never restarts; rows a rewind left behind are not on the path.
+ */
+export type PromptIndex = {
+  /** message uuid → the prompt it belongs to */
+  turnOf: Map<string, number>
+  /** message uuid → its place along the conversation (0 = first) */
+  order: Map<string, number>
+  /** the prompts so far */
+  total: number
+}
+
+/** a prompt the person typed: no tool result, no command echo, reminder or compaction summary */
+const isPrompt = (r: Row) => {
+  if (r.type !== 'user' || r.isSidechain === true || r.isMeta === true || r.isCompactSummary === true) return false
+  const c = (r.message as { content?: unknown } | undefined)?.content
+  if (typeof c === 'string') return c.trimStart() !== '' && !c.trimStart().startsWith('<')
+  if (!Array.isArray(c) || c.length === 0) return false
+  const blocks = c as { type?: string; text?: string }[]
+  if (blocks.some(b => b?.type === 'tool_result')) return false
+  const text = blocks.filter(b => b?.type === 'text').map(b => b.text ?? '').join('').trimStart()
+  return text === '' ? blocks.some(b => b?.type !== 'text') : !text.startsWith('<')
+}
+
+export async function promptIndex($: Api, sessionId: string): Promise<PromptIndex | undefined> {
+  const src = await findTranscript($, sessionId)
+  if (!src) return undefined
+  const byUuid = new Map<string, Row>()
+  let leaf: Row | undefined
+  for (const r of parseRows(src.text)) {
+    if (typeof r.uuid !== 'string' || r.isSidechain === true || !CHAIN.includes(r.type ?? '')) continue
+    byUuid.set(r.uuid, r)
+    leaf = r
+  }
+  const path: Row[] = []
+  const onPath = new Set<string>()
+  for (let r = leaf; r?.uuid && !onPath.has(r.uuid); ) {
+    onPath.add(r.uuid)
+    path.push(r)
+    const up = r.parentUuid ?? (typeof r.logicalParentUuid === 'string' ? r.logicalParentUuid : null)
+    r = up ? byUuid.get(up) : undefined
+  }
+  path.reverse()
+  const turnOf = new Map<string, number>()
+  const order = new Map<string, number>()
+  let total = 0
+  path.forEach((r, i) => {
+    if (isPrompt(r)) total++
+    turnOf.set(r.uuid!, total)
+    order.set(r.uuid!, i)
+  })
+  return { turnOf, order, total }
 }
 
 /** the last `"type":"<type>"` row's `field` in a transcript's text */

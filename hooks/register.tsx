@@ -16,7 +16,7 @@ import {
   switchTab,
   titleOfCurrent,
 } from './graph'
-import { deleteSession, sessionExists, sessionName, writeBranchTranscript } from './transcript'
+import { type PromptIndex, deleteSession, promptIndex, sessionExists, sessionName, writeBranchTranscript } from './transcript'
 
 const graphAtom = atom({ plugin: 'session-branch-control', key: 'graph' } as const, { sessions: {}, pending: {} } as Graph, {
   shape: 'graph-1',
@@ -35,6 +35,10 @@ const namesAtom = atom({ plugin: 'session-branch-control', key: 'names' } as con
   shape: 'names-1',
 })
 /** the heavy branch waiting on the delete dialog */
+/** 📍 where the person reads: the prompt the topmost message on screen belongs to, of how many */
+const viewAtom = atom({ plugin: 'session-branch-control', key: 'view' } as const, null as { at: number; total: number } | null, {
+  shape: 'view-1',
+})
 const confirmAtom = atom({ plugin: 'session-branch-control', key: 'confirm' } as const, null as { id: string; name: string } | null, {
   shape: 'confirm-1',
 })
@@ -223,6 +227,11 @@ const loadFor = async ($: Api) => {
   await update($, selectedAtom, () => null)
   // placed rows do not survive a resume or /clear
   await update($, readerAtom, () => READER0)
+  // another conversation: its own prompt numbers
+  index = undefined
+  indexedAt = -Infinity
+  seen.clear()
+  await update($, viewAtom, () => null)
 }
 
 // ---- reader: a full-width row placed in the transcript -----------------------
@@ -263,10 +272,80 @@ const topVisible = () => {
     const on = entry[1].on
     if (!on) continue
     if (on.first === 0) {
-      if (!head || entry[1].n < head[1].n) head = entry
-    } else if (!cut || entry[1].n < cut[1].n) cut = entry
+      if (!head || rank(entry) < rank(head)) head = entry
+    } else if (!cut || rank(entry) < rank(cut)) cut = entry
   }
   return (head ?? cut)?.[0] ?? null
+}
+
+// ---- where the person reads: prompt numbers from the transcript file ---------
+
+/** the live conversation's prompt numbers, read from the transcript file */
+let index: PromptIndex | undefined
+let indexedAt = -Infinity
+let indexing: Promise<void> | undefined
+/** re-read the file at most this often for messages it did not have yet */
+const INDEX_EVERY_MS = 5_000
+
+/**
+ * A message's place in the conversation: its place along the file's path,
+ * else (not written yet) after every known one, in the order it was drawn.
+ * Draw order alone misleads once older messages are drawn on scrolling up.
+ */
+const rank = ([id, s]: [string, Seen]) => index?.order.get(id) ?? 1e9 + s.n
+
+const refreshIndex = async ($: Api, force = false) => {
+  const now = await $.clock.now()
+  if (!force && now - indexedAt < INDEX_EVERY_MS) return
+  if (indexing) return indexing
+  indexedAt = now
+  indexing = (async () => {
+    try {
+      index = (await promptIndex($, await $.session.id())) ?? index
+    } catch {}
+  })()
+  await indexing
+  indexing = undefined
+}
+
+/**
+ * Drawing is pure (no state written while a render is dispatched): the
+ * render hooks only queue 📍's update, once per burst of draws.
+ */
+let viewQueued = false
+const queueView = ($: Api) => {
+  if (viewQueued) return
+  viewQueued = true
+  $.clock.after(50, () => {
+    viewQueued = false
+    void syncView($)
+  })
+}
+
+/** the prompt count right now, for a new branch's #n (the same count 📍 shows) */
+const promptsNow = async ($: Api) => {
+  await refreshIndex($, true)
+  return index?.total ?? (await $.session.turns())
+}
+
+/**
+ * 📍 the prompt the topmost message on screen belongs to, of how many: kept
+ * while only reader rows are on screen, re-read when the file is behind.
+ */
+const syncView = async ($: Api) => {
+  const shown = [...seen].filter(([, s]) => s.on)
+  if (shown.length === 0) return
+  const known = shown.filter(([id]) => index?.turnOf.has(id))
+  if (known.length < shown.length) {
+    // messages the file did not have when read: read it again (now, when none is known)
+    await refreshIndex($, known.length === 0)
+  }
+  if (!index) return
+  const top = shown.filter(([id]) => index!.turnOf.has(id)).sort((a, b) => rank(a) - rank(b))[0]
+  if (!top) return
+  const view = { at: index.turnOf.get(top[0])!, total: index.total }
+  const prev = await read($, viewAtom)
+  if (prev?.at !== view.at || prev?.total !== view.total) await update($, viewAtom, () => view)
 }
 
 /**
@@ -498,7 +577,7 @@ const ask = async ($: Api, kind: BranchKind, text: string, parentId: string | nu
     text,
     answer: '',
     status: 'pending',
-    turn: await $.session.turns(),
+    turn: await promptsNow($),
     at: await $.clock.now(),
   }
   await update($, nodesAtom, list => [...list, node])
@@ -948,10 +1027,12 @@ export const register: Register = on => {
   // learn what the transcript has on screen, so the reader can come back to it
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     track(e.requestId, e.props.onScreen)
+    queueView($ as unknown as Api)
     return next(e)
   })
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
     track(e.requestId, e.props.onScreen)
+    queueView($ as unknown as Api)
     return next(e)
   })
 
@@ -1082,11 +1163,15 @@ export const register: Register = on => {
     const question = shown ? `${shown.text}${shown.status === 'pending' ? ' …' : ''}` : ''
     const treeLabel = '  [展開樹 /t]'
     const readerLabel = readerOpen ? '[📖 收合閱讀 /r]' : '[📖 閱讀 /r]'
+    // 📍 the prompt the screen's top is in, of how many
+    const view = await read($, viewAtom)
+    const where = view ? `📍 ${view.at}/${view.total}  ` : ''
     // one row: size the free text by display width (CJK takes two cells)
-    const room = e.props.bodyColumns - cells('🌳 ') - cells(turn) - cells(treeLabel) - (nodes.length > 0 ? cells(readerLabel) + 1 : 0) - 1
+    const room = e.props.bodyColumns - cells(where) - cells('🌳 ') - cells(turn) - cells(treeLabel) - (nodes.length > 0 ? cells(readerLabel) + 1 : 0) - 1
     return (
       <Box gap={1}>
         <Button key="expand" plain onPress={() => void openPane($ as unknown as Api)}>
+          {view && <Text color="cyan">{where}</Text>}
           <Text>🌳 </Text>
           <Text dimColor>{turn}</Text>
           <Text>{cut(question, Math.max(6, room))}</Text>

@@ -73,6 +73,7 @@ declare module 'claude-code' {
       recent: string | null
       names: Shaped<Record<string, string>>
       confirm: Shaped<{ id: string; name: string } | null>
+      view: Shaped<{ at: number; total: number } | null>
     }
   }
 }
