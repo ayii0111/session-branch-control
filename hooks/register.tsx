@@ -1439,9 +1439,14 @@ export const register: Register = on => {
     const job = await prepareMerge($, r.id)
     if (typeof job === 'string') return { text: job }
     await update($, mergeJobAtom, () => job)
-    $.clock.after(0, () => {
-      void $.ui.open({ id: MERGE, title: '併入 session', focus: true, closeOnEscape: true, holdToasts: true, rows: 12 })
-    })
+    // opened right here, as the answer to the person's command: from a timer it
+    // counts as unasked and waits undrawn on terminals under 144 columns
+    const opened = await $.ui.open({ id: MERGE, title: '併入 session', focus: true, closeOnEscape: true, holdToasts: true, rows: 12 })
+    if (!opened.isPlaced) {
+      await update($, mergeJobAtom, () => null)
+      await $.ui.close({ id: MERGE })
+      return { text: `確認窗開不出來（${opened.reason}），這次沒有併入` }
+    }
     return { text: `比對好了：「${job.name.slice(0, 30)}」有 ${job.prompts} 次提問是目前 session 沒有的，請在確認窗決定是否併入` }
   })
 
