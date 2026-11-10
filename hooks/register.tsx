@@ -55,7 +55,9 @@ const nodesAtom = atom({ plugin: 'session-branch-control', key: 'nodes' } as con
 })
 const selectedAtom = atom({ plugin: 'session-branch-control', key: 'selected' } as const, null as string | null)
 const openAtom = atom({ plugin: 'session-branch-control', key: 'isOpen' } as const, false)
-const READER0: Reader = { row: null, req: null, node: null, open: false, back: null }
+const READER0: Reader = { node: null, rows: {}, open: [], back: null }
+const ROW_PREFIX = 'reader-'
+const rowOf = (nodeId: string) => `${ROW_PREFIX}${nodeId}`
 const readerAtom = atom({ plugin: 'session-branch-control', key: 'reader' } as const, READER0)
 
 const storeKey = (sessionId: string) => `tree:${sessionId}`
@@ -221,7 +223,6 @@ const loadFor = async ($: Api) => {
   await update($, selectedAtom, () => null)
   // placed rows do not survive a resume or /clear
   await update($, readerAtom, () => READER0)
-  placedAtSeq = -1
 }
 
 // ---- reader: a full-width row placed in the transcript -----------------------
@@ -233,10 +234,6 @@ const loadFor = async ($: Api) => {
 type Seen = { n: number; on: { first: number; last: number; of: number } | null | undefined }
 const seen = new Map<string, Seen>()
 let seq = 0
-/** `seq` when the reader row was placed: a row is reused while nothing new came after it */
-let placedAtSeq = -1
-/** whether the reader row is in the viewport, as its last draw was told */
-let readerOnScreen = false
 
 /**
  * A transcript message's requestId is its uuid (the transcript file's): only
@@ -273,33 +270,31 @@ const topVisible = () => {
 }
 
 /**
- * Show `nodeId` in the reader row at the transcript's end, placing a new row
- * when the conversation moved on since the last one. `jump`: remember where
- * the person was reading and scroll the reader into view (only from their own
- * press or command, where the engine lets a transcript row scroll).
+ * How a reader row is opened:
+ * - `here`: where the person already is (a fresh /q, unfolding in place): no scroll
+ * - `jump`: from elsewhere (the sidebar, /r): remember where they read, scroll to the row
+ * - `follow`: from inside a reader row (a breadcrumb, a follow-up): scroll, the
+ *   place they first came from stays the one to go back to
  */
-const openReader = async ($: Api, nodeId: string, jump: boolean) => {
+type OpenMode = 'here' | 'jump' | 'follow'
+
+/**
+ * Expand `nodeId`'s reading row. Each branch has its own row, standing where
+ * it was asked: the engine answers the same id with the row that stands, and
+ * places a new one at the transcript's end only when that row is gone (a
+ * resume, /clear or a compaction ended it). Scrolling only works from the
+ * person's own press or command.
+ */
+const openReader = async ($: Api, nodeId: string, mode: OpenMode) => {
   await update($, recentAtom, () => nodeId)
   const r = await read($, readerAtom)
-  const reuse = r.row !== null && r.req !== null && placedAtSeq === seq
-  // where the person reads now, unless that is the reader itself (then the
-  // place they came from before stays the one to go back to)
-  const back = jump ? (reuse && r.open && readerOnScreen && r.back ? r.back : (topVisible() ?? r.back)) : r.back
-  if (jump) await trace($, `openReader jump node=${nodeId} reuse=${reuse} readerOnScreen=${readerOnScreen} back=${back} ${seenSummary()}`)
-  if (reuse) {
-    await update($, readerAtom, v => ({ ...v, node: nodeId, open: true, back }))
-  } else {
-    const row = `reader-${newId()}`
-    await update($, readerAtom, () => ({ row, req: null, node: nodeId, open: true, back }))
-    const p = await $.ui.place({ id: row })
-    placedAtSeq = seq
-    const req = p.requestId ?? null
-    await update($, readerAtom, v => (v.row === row ? { ...v, req } : v))
-  }
-  if (jump) {
-    const req = (await read($, readerAtom)).req
-    if (req) await scrollTo($, req, 'to-reader')
-  }
+  const back = mode === 'here' ? null : mode === 'follow' ? r.back : (topVisible() ?? null)
+  await update($, readerAtom, v => ({ ...v, node: nodeId, open: v.open.includes(nodeId) ? v.open : [...v.open, nodeId], back }))
+  const p = await $.ui.place({ id: rowOf(nodeId) })
+  const req = p.requestId
+  if (req) await update($, readerAtom, v => ({ ...v, rows: { ...v.rows, [nodeId]: req } }))
+  if (mode !== 'here') await trace($, `openReader ${mode} node=${nodeId} req=${req} prev=${r.rows[nodeId] ?? '-'} back=${back} ${seenSummary()}`)
+  if (mode !== 'here' && req) await scrollTo($, req, 'to-reader')
 }
 
 /** bring a transcript row to the viewport's top; a refusal is told, never thrown */
@@ -351,20 +346,22 @@ const seenSummary = () => {
   return `seen=${seen.size} showing=${showing.length} ${showing.slice(0, 8).join(' ')}`
 }
 
-const foldReader = async ($: Api) => {
-  await update($, readerAtom, v => ({ ...v, open: false }))
-  await goBack($)
+/** whether the branch the reader controls act on is expanded */
+const focusOpen = (r: Reader) => r.node !== null && r.open.includes(r.node)
+
+/** fold `nodeId`'s row (default: the focused one) to one line in place, and go back to where the person was */
+const foldReader = async ($: Api, nodeId?: string) => {
+  const r = await read($, readerAtom)
+  const id = nodeId ?? r.node
+  if (!id) return
+  await update($, readerAtom, v => ({ ...v, open: v.open.filter(o => o !== id) }))
+  if (id === r.node) await goBack($)
 }
 
-const closeReader = async ($: Api) => {
-  await goBack($)
-  await update($, readerAtom, v => ({ ...READER0, back: v.back }))
-}
-
-/** /r and the 📖 buttons: fold an open reader, else open it on the selected (or latest) branch */
+/** /r and the 📖 buttons: fold the focused row, else open the selected (or focused, or latest) branch */
 const toggleReader = async ($: Api) => {
   const r = await read($, readerAtom)
-  if (r.row && r.open) {
+  if (focusOpen(r)) {
     await foldReader($)
     return false
   }
@@ -373,7 +370,7 @@ const toggleReader = async ($: Api) => {
   const target = (sel && nodes.some(n => n.id === sel) ? sel : null) ?? (r.node && nodes.some(n => n.id === r.node) ? r.node : null) ?? nodes.at(-1)?.id
   if (!target) return null
   await update($, selectedAtom, () => target)
-  await openReader($, target, true)
+  await openReader($, target, 'jump')
   return true
 }
 
@@ -465,8 +462,13 @@ const removeNode = async ($: Api, id: string) => {
   await update($, nodesAtom, list => list.filter(n => !gone.has(n.id)))
   await update($, selectedAtom, s => (s && gone.has(s) ? (target?.parentId ?? null) : s))
   await update($, recentAtom, v => (v && gone.has(v) ? null : v))
-  const r = await read($, readerAtom)
-  if (r.node && gone.has(r.node)) await closeReader($)
+  // their rows draw nothing from now on
+  await update($, readerAtom, v => ({
+    ...v,
+    node: v.node && gone.has(v.node) ? null : v.node,
+    open: v.open.filter(o => !gone.has(o)),
+    back: v.node && gone.has(v.node) ? null : v.back,
+  }))
   await persist($)
 }
 
@@ -495,17 +497,14 @@ const ask = async ($: Api, kind: BranchKind, text: string) => {
   await update($, nodesAtom, list => [...list, node])
   await update($, selectedAtom, () => node.id)
   await persist($)
-  // the answer shows in a full-width reader row at the transcript's end,
-  // where the person already is: no jump, nothing to come back to
-  await update($, readerAtom, v => ({ ...v, back: null }))
-
-  // detach from the command's dispatch: the reader row then lands under the
+  // the answer shows in the branch's own full-width row at the transcript's
+  // end, where the person already is: no jump, nothing to come back to.
+  // Detached from the command's dispatch: the row then lands under the
   // command's own echo (placed during the hook it would stand above it),
   // and a long answer is not cut off
   $.clock.after(0, () => {
     void (async () => {
-      placedAtSeq = -1
-      await openReader($, node.id, false)
+      await openReader($, node.id, 'here')
       const prompt = buildPrompt(kind, text, chain)
       let r = await $.model.fork({ prompt })
       if (!r.isAnswered && r.reason === 'nothing-to-fork') {
@@ -718,8 +717,7 @@ const showInherited = async ($: Api) => {
   // let the resumed history draw first, so the row lands after it
   $.clock.after(1500, () => {
     void (async () => {
-      placedAtSeq = -1
-      await openReader($, last.id, false)
+      await openReader($, last.id, 'here')
     })()
   })
 }
@@ -949,31 +947,32 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // the reader row: full width, as tall as the answer
+  // a branch's reading row: full width, as tall as the answer, where it was asked
   on('ui.render', { component: 'Placed' }, async ($, e, next) => {
-    if (e.props.plugin !== 'session-branch-control') return next(e)
-    const r = await read($, readerAtom)
-    if (e.props.id !== r.row) return next(e)
-    readerOnScreen = !!e.props.onScreen
+    if (e.props.plugin !== 'session-branch-control' || !e.props.id.startsWith(ROW_PREFIX)) return next(e)
     const nodes = await read($, nodesAtom)
-    const node = r.node ? nodes.find(n => n.id === r.node) : undefined
+    const node = nodes.find(n => n.id === e.props.id.slice(ROW_PREFIX.length))
+    // a deleted branch's row (or an older version's) draws nothing
     if (!node) return next(e)
+    const r = await read($, readerAtom)
+    const focused = r.node === node.id
     const { Box, Text, Button, Markdown } = $.ui.resolve(e)
     const icon = (n: BranchNode) => (n.kind === 'q' ? '?' : '⑂')
     const label = `${icon(node)} ${node.kind === 'q' ? '追問' : '假設'}：${node.text}`
-    const fold = () => foldReader($ as unknown as Api)
+    const fold = () => foldReader($ as unknown as Api, node.id)
     const back = () => goBack($ as unknown as Api)
-    const show = (id: string) => () => {
-      void (async () => {
+    const showBack = focused && r.back !== null
+    // another branch from inside this row: its own row, wherever it stands
+    const show = (id: string) => () =>
+      (async () => {
         await update($, selectedAtom, () => id)
-        await update($, readerAtom, v => ({ ...v, node: id, open: true }))
+        await openReader($ as unknown as Api, id, 'follow')
       })()
-    }
 
-    if (!r.open) {
+    if (!r.open.includes(node.id)) {
       return (
         <Box gap={1}>
-          <Button key="unfold" plain label="[▸ 展開]" onPress={() => openReader($ as unknown as Api, node.id, true)} />
+          <Button key="unfold" plain label="[▸ 展開]" onPress={() => openReader($ as unknown as Api, node.id, 'here')} />
           <Text dimColor>📖</Text>
           <Text wrap="truncate-end">{label}</Text>
         </Box>
@@ -994,15 +993,14 @@ export const register: Register = on => {
       <Box flexDirection="column">
         <Box gap={1}>
           <Button key="fold" plain label="[▴ 收合]" onPress={fold} />
-          {r.back && <Button key="back" plain label="[↩ 回原處]" onPress={back} />}
-          <Button key="close" plain label="[✕ 關閉]" onPress={() => closeReader($ as unknown as Api)} />
+          {showBack && <Button key="back" plain label="[↩ 回原處]" onPress={back} />}
           <Text dimColor>📖 支線閱讀區 · /r 開合</Text>
         </Box>
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
           <Box flexWrap="wrap">
             <Button key="crumb-main" plain label="● 主線" onPress={() => (async () => {
               await update($, selectedAtom, () => null)
-              await closeReader($ as unknown as Api)
+              await foldReader($ as unknown as Api, node.id)
             })()} />
             {chain.slice(0, -1).map(n => (
               <Box key={`c-${n.id}`}>
@@ -1036,11 +1034,11 @@ export const register: Register = on => {
         </Box>
         <Box gap={1}>
           <Button key="fold2" plain label="[▴ 收合]" onPress={fold} />
-          {r.back && <Button key="back2" plain label="[↩ 回原處]" onPress={back} />}
+          {showBack && <Button key="back2" plain label="[↩ 回原處]" onPress={back} />}
         </Box>
         {floatAt !== null && (
           <Box position="absolute" top={floatAt} right={0} gap={1}>
-            {r.back && <Button key="back-float" plain label="[↩ 回原處]" onPress={back} />}
+            {showBack && <Button key="back-float" plain label="[↩ 回原處]" onPress={back} />}
             <Button key="fold-float" plain label="[▴ 收合]" onPress={fold} />
           </Box>
         )}
@@ -1067,9 +1065,9 @@ export const register: Register = on => {
     const sel = await read($, selectedAtom)
     const reader = await read($, readerAtom)
     const recent = await read($, recentAtom)
-    const readerOpen = reader.row !== null && reader.open
+    const readerOpen = focusOpen(reader)
     // the branch the reader holds (else the one last read, else the selected): its turn and question
-    const shownId = [reader.row ? reader.node : null, recent, sel].find(id => id && nodes.some(n => n.id === id))
+    const shownId = [reader.node, recent, sel].find(id => id && nodes.some(n => n.id === id))
     const shown = shownId ? nodes.find(n => n.id === shownId) : undefined
     const { Box, Text, Button } = $.ui.resolve(e)
     const turn = shown ? `#${shown.turn} ` : ''
@@ -1205,13 +1203,13 @@ export const register: Register = on => {
     const recent = await read($, recentAtom)
 
     const reader = await read($, readerAtom)
-    const readerOpen = reader.row !== null && reader.open
+    const readerOpen = focusOpen(reader)
     // press handlers that scroll return their promise: the engine lets a
     // transcript row scroll only while the press is still being answered
     const goMain = () =>
       (async () => {
         await update($, selectedAtom, () => null)
-        if (reader.row) await closeReader($ as unknown as Api)
+        if (readerOpen) await foldReader($ as unknown as Api)
       })()
     // the sidebar is the outline: a pick opens the branch in the full-width reader
     // ...and folds the sidebar away (the person's open/closed preference kept),
@@ -1221,7 +1219,7 @@ export const register: Register = on => {
         await update($, selectedAtom, () => id)
         await $.ui.close({ id: PANE })
         await update($, openAtom, () => false)
-        await openReader($ as unknown as Api, id, true)
+        await openReader($ as unknown as Api, id, 'jump')
       })()
     const readerButton = (key: string) => (
       <Button key={key} label={readerOpen ? '📖 收合閱讀' : '📖 閱讀'} hotkey="r" onPress={() => toggleReader($ as unknown as Api)} />

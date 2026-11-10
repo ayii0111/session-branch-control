@@ -43,7 +43,7 @@ git clone https://github.com/ayii0111/session-branch-control.git && cd session-b
 | 功能 | 用到的 cc mod API |
 |---|---|
 | 輕支線問答 | `$.model.fork`：帶著主線完整脈絡、不用工具、答案不寫回主線，並沿用主線的 prompt cache |
-| 支線閱讀區 | `$.ui.place` 在對話尾端放一列全寬區塊；`UserMessage`／`AssistantMessage` 的 render hook 記下畫面上緣是哪則訊息，`$.ui.scroll({ to: { requestId } })` 跳去／捲回 |
+| 支線閱讀區 | 每條支線一列 `$.ui.place`（id `reader-<支線>`），提問時放在對話尾端；同 id 再放時 cc 回傳原本那列，被清掉才放到尾端；`UserMessage`／`AssistantMessage` 的 render hook 記下畫面上緣是哪則訊息，`$.ui.scroll({ to: { requestId } })` 跳去／捲回 |
 | 併回主線、升級時寫入紀錄 | `$.session.append`：在歷史最後面加一筆隱藏的 user 訊息，不觸發新的一輪 |
 | 升級成重支線 | `hooks/transcript.ts` 照 `--fork-session` 的做法寫好子 session 的 `~/.claude/projects/<專案>/<id>.jsonl`（中繼列＋壓縮邊界之後的訊息鏈，sessionId 改寫），再接上支線問答成為一般的 user／assistant 訊息；接著 `/resume` 或新分頁 `claude --resume`。寫不出來就退回 `--fork-session`／`/branch`＋隱藏紀錄 |
 | 原地切換、原地分出 | `$.command.run` 觸發內建 `/resume`、`/branch`（要從按鈕或計時器呼叫，不能在指令 hook 裡直接呼叫） |

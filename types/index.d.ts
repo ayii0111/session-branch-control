@@ -42,16 +42,17 @@ export type Graph = {
   inplace?: { parentId: string; title: string; record?: string; fromBranch?: string; fromTurn: number; at: number }
 }
 
-/** the full-width reading row placed in the transcript (`$.ui.place`) */
+/**
+ * The reading rows placed in the transcript (`$.ui.place`): one per light
+ * branch, row id `reader-<branch id>`, standing where the branch was asked.
+ */
 export type Reader = {
-  /** the placed row's id; null = no reader row */
-  row: string | null
-  /** the placed row's requestId, what `$.ui.scroll` takes */
-  req: string | null
-  /** the branch node it shows */
+  /** the branch the reader controls act on (/r, the mini bar): the last one opened */
   node: string | null
-  /** expanded (true) or folded to one line */
-  open: boolean
+  /** branch id → its placed row's requestId, what `$.ui.scroll` takes */
+  rows: Record<string, string>
+  /** branch ids whose rows are expanded (the rest are folded to one line) */
+  open: string[]
   /** requestId of the transcript message that was at the top before jumping */
   back: string | null
 }

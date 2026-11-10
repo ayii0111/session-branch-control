@@ -335,6 +335,7 @@ test('light branches list newest first and mark the one last read; ↳ primes a 
     return { value: { isPlaced: true, requestId: `req-${e.id}` } }
   })
   on('ui.scroll', () => ({ value: { isScrolled: true } }))
+  on('ui.log', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
   on('prompt.fill', (_, e) => {
     filled.push(e.text)
@@ -367,8 +368,14 @@ test('light branches list newest first and mark the one last read; ↳ primes a 
   let rows = await branchRows()
   expect(rows.map(b => (b.text ?? '').includes('second'))).toEqual([true, false])
 
-  // read the older one: it is marked
+  // each /q placed its own row where it was asked
+  expect(placed.length).toBe(2)
+  expect(new Set(placed).size).toBe(2)
+  // read the older one: its own row is asked for again (the engine answers
+  // the row that stands), never a new row; it is marked
   await pane.press({ key: rows[1]!.key! })
+  expect(placed.length).toBe(3)
+  expect(placed[2]).toBe(placed[0])
   await pane.unmount()
   pane = await $.ui.mount(PANE)
   rows = await branchRows()
