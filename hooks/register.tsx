@@ -1258,7 +1258,7 @@ export const register: Register = on => {
       return (
         <Box gap={1}>
           <Button key="unfold" plain label="[▸ 展開]" onPress={() => openReader($ as unknown as Api, node.id, 'here')} />
-          <Text dimColor>📖</Text>
+          <Text dimColor>{`📖 #${node.turn}`}</Text>
           {rewound && <Text color="yellow">↶</Text>}
           <Text wrap="truncate-end">{label}</Text>
         </Box>
@@ -1280,7 +1280,7 @@ export const register: Register = on => {
         <Box gap={1}>
           <Button key="fold" plain label="[▴ 收合]" onPress={fold} />
           {showBack && <Button key="back" plain label="[↩ 回原處]" onPress={back} />}
-          <Text dimColor>📖 支線閱讀區 · /r 開合</Text>
+          <Text dimColor>{`📖 支線閱讀區 #${node.turn} · /r 開合`}</Text>
         </Box>
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
           <Box flexWrap="wrap">

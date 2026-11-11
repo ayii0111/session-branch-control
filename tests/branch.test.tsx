@@ -81,6 +81,8 @@ test('/q opens a branch, its answer lands in the full-width reader, merge writes
   // 📖 folds the open reader, a second press opens it again and jumps to it
   await pane.press({ key: 'reader' })
   expect(await reader.find({ type: 'Text', text: /ANSWER/ })).toBeUndefined()
+  // folded, it still says which prompt it was asked after
+  expect((await reader.find({ type: 'Text', text: /📖/ }))?.text).toBe('📖 #7')
   await pane.press({ key: 'reader' })
   expect((await reader.find({ type: 'Text', text: /若改用 OT/ }))?.text).toContain('若改用 OT')
   await pane.unmount()
