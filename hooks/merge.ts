@@ -3,7 +3,9 @@ import { CHAIN, type Row, findTranscript, isPrompt, parseRows } from './transcri
 
 // Merging a heavy branch into the current session: the part of the other
 // session's conversation this one does not have is written into this one's
-// history as one hidden record, tool calls included. The other session is
+// history as one hidden record, tool calls included, which the running model
+// reads; its rows themselves are also copied into this one's transcript file
+// (splice.ts), so a reload shows them as ordinary turns. The other session is
 // left as it is.
 //
 // What "this one does not have" is: a fork keeps its rows' uuids, so the rows
@@ -34,6 +36,8 @@ export type MergePlan = {
   otherCwd: string | undefined
   /** some of it did not fit */
   trimmed: boolean
+  /** the other session's rows brought over, as they stand in its file */
+  rows: Row[]
 }
 
 const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max)}…（截斷，原長 ${s.length} 字）` : s)
@@ -148,7 +152,11 @@ export async function planMerge(
   path.forEach((r, i) => {
     if (have.has(r.uuid!) || r.uuid === after) start = i + 1
   })
-  const tail = path.slice(start)
+  // end on a finished answer: rows of a turn still running (a tool call
+  // without its result yet) cannot be followed by this session's next prompt
+  const rest = path.slice(start)
+  const end = rest.findLastIndex((r, i) => r.type === 'assistant' && !blocksOf(r).some(b => b.type === 'tool_use') && rest[i + 1]?.type !== 'assistant')
+  const tail = rest.slice(0, end + 1)
   const pieces = tail.flatMap(piecesOf)
   if (!pieces.some(p => p.kind !== 'result')) return 'empty'
 
@@ -174,5 +182,6 @@ export async function planMerge(
     preview,
     otherCwd,
     trimmed,
+    rows: tail,
   }
 }

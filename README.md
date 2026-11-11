@@ -47,12 +47,14 @@ git clone https://github.com/ayii0111/session-branch-control.git && cd session-b
 | 併回主線、升級時寫入紀錄 | `$.session.append`：在歷史最後面加一筆隱藏的 user 訊息，不觸發新的一輪 |
 | 升級成重支線 | `hooks/transcript.ts` 照 `--fork-session` 的做法寫好子 session 的 `~/.claude/projects/<專案>/<id>.jsonl`（中繼列＋壓縮邊界之後的訊息鏈，sessionId 改寫），再接上支線問答成為一般的 user／assistant 訊息；接著 `/resume` 或新分頁 `claude --resume`。寫不出來就退回 `--fork-session`／`/branch`＋隱藏紀錄 |
 | 併入另一個 session | `hooks/merge.ts` 讀兩邊的紀錄檔：fork 會沿用訊息 uuid，所以對方路徑上「最後一則目前 session 也有的訊息」之後的部分就是要補的；轉成文字（含工具呼叫與截斷的結果）後用 `$.session.append` 寫入。地圖記下 `mergedInto[目前 id].upto`，再併只補之後的 |
+| 併回／併入在重載後顯示成一般對話 | `hooks/splice.ts` 直接改目前 session 的 `.jsonl`：輕支線每段問答做成 user＋assistant 兩列，插在提問那一輪之後；重分支的列照原樣複製（改 `sessionId`、重新串 `parentUuid`）接在最後面。執行中的 cc 不會重讀檔案，它下一列仍掛在它所知的最新一列上，所以在 `turn.complete` 與 `session.end` 再修一次：移除 `$.session.append` 的隱藏紀錄，把掛在插入點上的列改掛到插入段的最後一列。改寫前後各讀一次檔，期間 cc 有寫入就重來 |
 | 原地切換、原地分出 | `$.command.run` 觸發內建 `/resume`、`/branch`（要從按鈕或計時器呼叫，不能在指令 hook 裡直接呼叫） |
 | 新分頁 | `orca terminal create` 執行 `claude --resume <id> [--fork-session --session-id <uuid>]` |
 | 地圖 | 每個專案一個 JSON：`~/.claude/session-branch-control/<專案路徑>.json`，所有分頁共用；每 8 秒同步一次 |
 
 - `hooks/register.tsx`：指令、面板、輕支線、升級／分出流程
 - `hooks/merge.ts`：併入另一個 session 時的比對與紀錄內容
+- `hooks/splice.ts`：把併回／併入的對話寫進目前 session 的紀錄檔，並修補之後的串接
 - `hooks/graph.ts`：地圖檔讀寫、Orca 分頁操作（跨檔案傳 `$` 的 helper 必須寫成 function 宣告）
 - 新分頁裡的子 session 啟動時，會從地圖檔的 `pending` 取出屬於自己的支線紀錄寫進歷史
 

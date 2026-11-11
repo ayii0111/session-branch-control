@@ -17,7 +17,8 @@ import {
   titleOfCurrent,
 } from './graph'
 import { planMerge } from './merge'
-import { type PromptIndex, allSessionIds, deleteSession, promptIndex, sessionExists, sessionName, writeBranchTranscript } from './transcript'
+import { type SpliceJob, repairSplices, spliceLight, spliceMerged } from './splice'
+import { type PromptIndex, type Row, allSessionIds, deleteSession, promptIndex, sessionExists, sessionName, writeBranchTranscript } from './transcript'
 
 const graphAtom = atom({ plugin: 'session-branch-control', key: 'graph' } as const, { sessions: {}, pending: {} } as Graph, {
   shape: 'graph-1',
@@ -477,16 +478,27 @@ const toggleReader = async ($: Api) => {
 const mergeBack = async ($: Api, id: string) => {
   const chain = chainOf(await read($, nodesAtom), id).filter(n => n.status === 'done')
   if (chain.length === 0) return
+  let hidden: string | null
   try {
     // a hidden user row at the end: the main agent reads it next turn,
     // no turn is started and nothing already sent changes (cache kept)
-    await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: toRecord(chain, 'merge') }] } })
-    await update($, nodesAtom, list => list.map(n => (chain.some(c => c.id === n.id) ? { ...n, merged: true } : n)))
-    await persist($)
-    $.ui.toast(`已把 ${chain.length} 段支線問答併回主線，主線下一輪就會讀到`)
+    hidden = await appendRecord($, toRecord(chain, 'merge'))
   } catch (err) {
     $.ui.toast(`併回失敗：${String((err as Error)?.message ?? err)}`)
+    return
   }
+  const fresh = chain.filter(n => !n.merged)
+  await update($, nodesAtom, list => list.map(n => (chain.some(c => c.id === n.id) ? { ...n, merged: true } : n)))
+  await persist($)
+  // and as visible turns in the transcript file, after the turns they were asked in
+  const cur = await $.session.id()
+  const job = await spliceLight($, cur, fresh, hidden).catch(() => undefined)
+  if (job) await keepSplice($, cur, job)
+  $.ui.toast(
+    job
+      ? `已把 ${chain.length} 段支線問答併回主線：主線下一輪就會讀到，重新載入後會顯示在當時提問的位置`
+      : `已把 ${chain.length} 段支線問答併回主線，主線下一輪就會讀到（沒能寫進紀錄檔，重新載入後不會顯示）`,
+  )
 }
 
 const upgradeNode = async ($: Api, id: string, where: 'here' | 'tab') => {
@@ -674,8 +686,29 @@ const reasonText = (r: { reason: string; status?: number | null }) =>
 
 // ---- session map (B layer) ----------------------------------------------
 
+/** a hidden user row at the history's end; its uuid, or null when a plugin refused it */
 const appendRecord = async ($: Api, text: string) => {
-  await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
+  const r = await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
+  return 'uuid' in r && typeof r.uuid === 'string' ? r.uuid : null
+}
+
+/** a session's splices whose links may still need mending (splice.ts) */
+const spliceKey = (sessionId: string) => `splice:${sessionId}`
+
+const keepSplice = async ($: Api, sessionId: string, job: SpliceJob) => {
+  const prev = await $.store.get(spliceKey(sessionId))
+  await $.store.set(spliceKey(sessionId), [...(Array.isArray(prev) ? (prev as SpliceJob[]) : []), job])
+}
+
+/** mend `sessionId`'s file for rows cc wrote since; `done`: its process writes no more, forget them */
+const mendSplices = async ($: Api, sessionId: string, done: boolean) => {
+  const jobs = await $.store.get(spliceKey(sessionId))
+  if (!Array.isArray(jobs) || jobs.length === 0) return
+  try {
+    await repairSplices($, sessionId, jobs as SpliceJob[])
+  } catch {}
+  if (done) await $.store.delete(spliceKey(sessionId))
+  else await $.store.set(spliceKey(sessionId), jobs)
 }
 
 /** write this process's tab into the map, take any record waiting for this session */
@@ -1017,6 +1050,7 @@ const mergeRowsAtom = atom({ plugin: 'session-branch-control', key: 'mergeRows' 
 })
 /** the record waiting on the dialog, and each merge row's record: too big to keep in state */
 let mergeText = ''
+let mergeTaken: Row[] = []
 const mergeTexts = new Map<string, string>()
 /** an unfolded merge row shows at most this much of its record */
 const MERGE_SHOW_MAX = 30_000
@@ -1048,6 +1082,7 @@ const prepareMerge = async ($: Api, fromId: string): Promise<MergeJob | string> 
   if (plan === 'missing') return `讀不到「${name}」的紀錄檔`
   if (plan === 'empty') return `「${name}」沒有目前 session 還沒有的內容`
   mergeText = plan.text
+  mergeTaken = plan.rows
   const live = await read($, liveTabsAtom)
   return {
     from: fromId,
@@ -1065,18 +1100,24 @@ const prepareMerge = async ($: Api, fromId: string): Promise<MergeJob | string> 
 const answerMerge = async ($: Api, yes: boolean) => {
   const job = await read($, mergeJobAtom)
   const text = mergeText
+  const taken = mergeTaken
   mergeText = ''
+  mergeTaken = []
   await update($, mergeJobAtom, () => null)
   await $.ui.close({ id: MERGE })
   if (!yes || !job || !text) return
   const cur = await $.session.id()
+  let hidden: string | null
   try {
     // a hidden user row, as merge-back writes: read next turn, no reload
-    await appendRecord($, text)
+    hidden = await appendRecord($, text)
   } catch (err) {
     $.ui.toast(`併入失敗：${String((err as Error)?.message ?? err)}`)
     return
   }
+  // and its rows themselves at the end of the transcript file: a reload shows them as turns
+  const spliced = await spliceMerged($, cur, taken, job.name, hidden).catch(() => undefined)
+  if (spliced) await keepSplice($, cur, spliced)
   const at = await $.clock.now()
   await mutate($, g => {
     const s = g.sessions[job.from]
@@ -1088,7 +1129,10 @@ const answerMerge = async ($: Api, yes: boolean) => {
   mergeTexts.set(rowId, text)
   await update($, mergeRowsAtom, v => ({ ...v, [rowId]: { name: job.name, prompts: job.prompts, tools: job.tools, open: false } }))
   await $.ui.place({ id: rowId })
-  $.ui.toast(`已把「${job.name.slice(0, 30)}」的 ${job.prompts} 次提問補進目前 session，下一輪就會讀到`)
+  $.ui.toast(
+    `已把「${job.name.slice(0, 30)}」的 ${job.prompts} 次提問補進目前 session，下一輪就會讀到` +
+      (spliced ? '；重新載入後會顯示成一般對話' : '（沒能寫進紀錄檔，重新載入後不會顯示）'),
+  )
 }
 
 /** what cc calls each session of the current family now */
@@ -1119,6 +1163,8 @@ export const register: Register = on => {
       description: '把地圖上另一個 session 多出來的對話（含工具呼叫）補進目前 session，對方保持原樣',
       argumentHint: '[session id 前幾碼]',
     })
+    // splices a process that ended without saying so left unmended
+    await mendSplices($ as unknown as Api, await $.session.id(), true)
     await loadFor($ as unknown as Api)
     await update($, mapCollapsedAtom, () => false)
     if ((await $.store.get(MAP_COLLAPSED_KEY)) === true) await update($, mapCollapsedAtom, () => true)
@@ -1340,8 +1386,17 @@ export const register: Register = on => {
     )
   })
 
+  // a turn's rows hang on the newest row cc knows, which may be where a splice went in
+  on('turn.complete', async ($, e, next) => {
+    const r = await next(e)
+    await mendSplices($ as unknown as Api, await $.session.id(), false)
+    return r
+  })
+
   on('session.end', async ($, e, next) => {
     const oldId = e.sessionId
+    // this process writes that session no more: mend its file once more, before a reload reads it
+    await mendSplices($ as unknown as Api, oldId, true)
     const r = await next(e)
     if (e.reason === 'resume' || e.reason === 'clear') {
       // an in-place /resume, /branch or /clear does not fire session.start again

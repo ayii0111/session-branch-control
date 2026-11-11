@@ -713,6 +713,7 @@ test('merging a heavy branch brings over only what this session lacks, tool call
   on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.id', () => ({ value: 'P' }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('session.root', () => ({ value: '/w' }))
   on('session.cwd', () => ({ value: '/w' }))
   on('fs.exists', (_, e) => ({ value: files.has(e.path) }))
@@ -768,4 +769,115 @@ test('merging a heavy branch brings over only what this session lacks, tool call
 
   // nothing new since: nothing to merge
   expect((await $.command.run({ command: 'merge', args: 'K' })).text).toContain('沒有目前 session 還沒有的內容')
+
+  // K's rows themselves now stand at the end of P's file, as turns a reload shows
+  const P = '/h/.claude/projects/-w/P.jsonl'
+  const lines = () => files.get(P)!.trim().split('\n').map(l => JSON.parse(l) as Record<string, any>)
+  const u2 = lines().find(r => r.uuid === 'u2')!
+  expect(u2.parentUuid).toBe('p2')
+  expect(u2.sessionId).toBe('P')
+  expect(u2.message.content).toBe('（⤳ 併入自「kid」）K question')
+  expect(lines().find(r => r.uuid === 'r2')!.parentUuid).toBe('a2')
+
+  // cc then stores the hidden record and the next prompt on it; at the end the file is mended
+  const hidden = session.appended()[0]!.uuid!
+  files.set(
+    P,
+    files.get(P) +
+      `${row({ type: 'user', uuid: hidden, parentUuid: 'p2', isMeta: true, message: { role: 'user', content: 'RECORD' } })}\n` +
+      `${row({ type: 'user', uuid: 'p3', parentUuid: hidden, message: { role: 'user', content: 'next' } })}\n`,
+  )
+  await $.session.end({ reason: 'other', sessionId: 'P', resume: {} } as never)
+  expect(lines().some(r => r.uuid === hidden)).toBe(false)
+  expect(lines().find(r => r.uuid === 'p3')!.parentUuid).toBe('a3')
+})
+
+test('merging a light branch back writes it into the file as turns, after the turn it was asked in', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  const session = mock.session(on)
+  const row = (o: Record<string, unknown>) => JSON.stringify({ isSidechain: false, cwd: '/w', ...o })
+  const P = '/h/.claude/projects/-w/P.jsonl'
+  const files = new Map<string, string>([
+    [
+      P,
+      `${[
+        row({ type: 'user', uuid: 'u1', parentUuid: null, message: { role: 'user', content: 'first' } }),
+        row({ type: 'assistant', uuid: 'a1', parentUuid: 'u1', message: { model: 'm', role: 'assistant', content: [{ type: 'text', text: 'one' }] } }),
+      ].join('\n')}\n`,
+    ],
+  ])
+  const placed: string[] = []
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.place', (_, e) => {
+    placed.push(e.id)
+    return { value: { isPlaced: true, requestId: `req-${e.id}` } }
+  })
+  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/h' : undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'P' }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  on('session.root', () => ({ value: '/w' }))
+  on('session.cwd', () => ({ value: '/w' }))
+  on('session.turns', () => ({ value: 1 }))
+  on('model.fork', () => ({
+    value: { isAnswered: true, text: 'BRANCH ANSWER', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+  }))
+  on('fs.exists', (_, e) => ({ value: files.has(e.path) }))
+  on('fs.read', (_, e) => {
+    const t = files.get(e.path)
+    if (t === undefined) throw new Error('ENOENT')
+    return { value: t }
+  })
+  on('fs.write', (_, e) => {
+    files.set(e.path, e.text)
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: '/w', surface: 'terminal', isInteractive: true })
+
+  // asked after the first turn; the main thread then goes on
+  await $.command.run({ command: 'q', args: 'what is one' })
+  await clock.advance(10)
+  files.set(
+    P,
+    files.get(P) +
+      `${row({ type: 'user', uuid: 'u2', parentUuid: 'a1', message: { role: 'user', content: 'second' } })}\n` +
+      `${row({ type: 'assistant', uuid: 'a2', parentUuid: 'u2', message: { model: 'm', role: 'assistant', content: [{ type: 'text', text: 'two' }] } })}\n`,
+  )
+
+  const reader = await $.ui.mount({
+    plugin: 'session-branch-control',
+    component: 'Placed',
+    requestId: `req-${placed[0]}`,
+    surface: 'terminal',
+    props: { id: placed[0]!, plugin: 'session-branch-control' },
+  })
+  await reader.press({ key: 'merge' })
+  await reader.unmount()
+  expect(session.appended().length).toBe(1)
+
+  const lines = () => files.get(P)!.trim().split('\n').map(l => JSON.parse(l) as Record<string, any>)
+  const order = lines().map(r => r.uuid)
+  const ask = lines().find(r => r.message?.content === '（輕支線）what is one')!
+  const reply = lines().find(r => r.parentUuid === ask.uuid)!
+  expect(ask.parentUuid).toBe('a1')
+  expect(reply.type).toBe('assistant')
+  expect(reply.message.content[0].text).toBe('BRANCH ANSWER')
+  // between the two turns, in the chain and in the file
+  expect(lines().find(r => r.uuid === 'u2')!.parentUuid).toBe(reply.uuid)
+  expect(order.indexOf(ask.uuid)).toBeLessThan(order.indexOf('u2'))
+
+  // the hidden record cc stores is dropped; what hung on it hangs on the conversation's end
+  const hidden = session.appended()[0]!.uuid!
+  files.set(
+    P,
+    files.get(P) +
+      `${row({ type: 'user', uuid: hidden, parentUuid: 'a2', isMeta: true, message: { role: 'user', content: 'RECORD' } })}\n` +
+      `${row({ type: 'user', uuid: 'u3', parentUuid: hidden, message: { role: 'user', content: 'third' } })}\n`,
+  )
+  await $.session.end({ reason: 'other', sessionId: 'P', resume: {} } as never)
+  expect(lines().some(r => r.uuid === hidden)).toBe(false)
+  expect(lines().find(r => r.uuid === 'u3')!.parentUuid).toBe('a2')
 })

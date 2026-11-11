@@ -181,6 +181,52 @@ export const parseRows = (text: string) => {
   return rows
 }
 
+/** the fields every message row of a session carries, taken from one of its rows */
+export const baseOf = (env: Row, sessionId: string) => ({
+  isSidechain: false,
+  userType: env.userType ?? 'external',
+  entrypoint: env.entrypoint ?? 'cli',
+  cwd: env.cwd,
+  version: env.version,
+  gitBranch: env.gitBranch,
+  sessionId,
+})
+
+/** one question and its answer as two ordinary, visible rows: the user's, then the assistant's */
+export const pairRows = (base: Record<string, unknown>, model: string, parent: string, ask: string, answer: string, at: string): [Row, Row] => {
+  const userUuid = crypto.randomUUID()
+  const replyUuid = crypto.randomUUID()
+  return [
+    {
+      parentUuid: parent,
+      ...base,
+      type: 'user',
+      message: { role: 'user', content: ask },
+      uuid: userUuid,
+      timestamp: at,
+      origin: { kind: 'human' },
+      promptSource: 'typed',
+    },
+    {
+      parentUuid: userUuid,
+      ...base,
+      type: 'assistant',
+      message: {
+        model,
+        id: `msg_sbc_${replyUuid.replace(/-/g, '')}`,
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'text', text: answer }],
+        stop_reason: 'end_turn',
+        stop_sequence: null,
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+      uuid: replyUuid,
+      timestamp: at,
+    },
+  ]
+}
+
 /**
  * Write `<childId>.jsonl` beside the parent's: the parent's conversation, then
  * `chain` as visible turns. Returns false (nothing written) when it cannot.
@@ -224,49 +270,14 @@ export async function writeBranchTranscript(
   const lastAssistant = [...path].reverse().find(r => r.type === 'assistant')
   const model = (lastAssistant?.message as { model?: string } | undefined)?.model ?? (await $.session.model())
   const at = new Date(await $.clock.now()).toISOString()
-  const base = {
-    isSidechain: false,
-    userType: env.userType ?? 'external',
-    entrypoint: env.entrypoint ?? 'cli',
-    cwd: env.cwd,
-    version: env.version,
-    gitBranch: env.gitBranch,
-    sessionId: childId,
-  }
+  const base = baseOf(env, childId)
 
   const added: Row[] = []
   let parent = leaf.uuid
   for (const n of chain) {
-    const userUuid = crypto.randomUUID()
-    const replyUuid = crypto.randomUUID()
-    added.push({
-      parentUuid: parent,
-      ...base,
-      type: 'user',
-      message: { role: 'user', content: `${n.kind === 'q' ? '【支線追問】' : '【支線假設】'}${n.text}` },
-      uuid: userUuid,
-      timestamp: at,
-      origin: { kind: 'human' },
-      promptSource: 'typed',
-    })
-    added.push({
-      parentUuid: userUuid,
-      ...base,
-      type: 'assistant',
-      message: {
-        model,
-        id: `msg_sbc_${replyUuid.replace(/-/g, '')}`,
-        type: 'message',
-        role: 'assistant',
-        content: [{ type: 'text', text: n.answer }],
-        stop_reason: 'end_turn',
-        stop_sequence: null,
-        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-      },
-      uuid: replyUuid,
-      timestamp: at,
-    })
-    parent = replyUuid
+    const pair = pairRows(base, model, parent, `${n.kind === 'q' ? '【支線追問】' : '【支線假設】'}${n.text}`, n.answer, at)
+    added.push(...pair)
+    parent = pair[1].uuid!
   }
 
   const out: Row[] = [
