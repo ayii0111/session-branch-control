@@ -1149,18 +1149,18 @@ const refreshNames = async ($: Api, g: Graph, cur: string) => {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'q', description: '開輕分支：針對目前 session 追問概念或「如果改成…會怎樣」（答案只進閱讀區，不進主線；對話進行中也能立即送出）', argumentHint: '[問題]', immediate: true })
-    await $.command.register({ name: 'qf', description: '接著選中（或最後看過）的輕分支追問，帶著那條支線的問答', argumentHint: '[問題]' })
-    await $.command.register({ name: 'tree', description: '打開脈絡樹面板並聚焦' })
+    await $.command.register({ name: 'qf', description: '接著選中（或最後看過）的輕分支追問，帶著那條支線的問答（對話進行中也能立即送出）', argumentHint: '[問題]', immediate: true })
+    await $.command.register({ name: 'tree', description: '打開脈絡樹面板並聚焦（對話進行中也能用）', immediate: true })
     await $.command.register({ name: 't', description: '快速開合脈絡樹面板（對話進行中也能用）', immediate: true })
     await $.command.register({ name: 'r', description: '開合支線閱讀區（全寬顯示選中支線的問答；收合時捲回原處）', immediate: true })
-    await $.command.register({ name: 'up', description: '把選中的輕支線升級成重支線，原地切過去' })
-    await $.command.register({ name: 'up-tab', description: '把選中的輕支線升級成重支線，開在新分頁' })
-    await $.command.register({ name: 'sub', description: '從目前 session 分出子 session，開在新分頁', argumentHint: '[標題]' })
-    await $.command.register({ name: 'sub-here', description: '從目前 session 分出子 session，原地切過去', argumentHint: '[標題]' })
+    await $.command.register({ name: 'up', description: '⚠️ 勿在回覆中使用｜把選中的輕支線升級成重支線，原地切過去' })
+    await $.command.register({ name: 'up-tab', description: '⚠️ 勿在回覆中使用｜把選中的輕支線升級成重支線，開在新分頁' })
+    await $.command.register({ name: 'sub', description: '⚠️ 勿在回覆中使用｜從目前 session 分出子 session，開在新分頁', argumentHint: '[標題]' })
+    await $.command.register({ name: 'sub-here', description: '⚠️ 勿在回覆中使用｜從目前 session 分出子 session，原地切過去', argumentHint: '[標題]' })
     await $.command.register({ name: 'map', description: '開合 Session 地圖區塊', immediate: true })
     await $.command.register({
       name: 'merge',
-      description: '把地圖上另一個 session 多出來的對話（含工具呼叫）補進目前 session，對方保持原樣',
+      description: '⚠️ 勿在回覆中使用｜把地圖上另一個 session 多出來的對話（含工具呼叫）補進目前 session，對方保持原樣',
       argumentHint: '[session id 前幾碼]',
     })
     // splices a process that ended without saying so left unmended
