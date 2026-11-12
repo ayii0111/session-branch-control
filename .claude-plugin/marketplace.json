@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "session-branch-control",
+  "description": "Side branches for Claude Code conversations: ask off the main thread without polluting its context, merge back or upgrade into real child sessions.",
+  "owner": {
+    "name": "ayii"
+  },
+  "plugins": [
+    {
+      "name": "session-branch-control",
+      "description": "Side branches for questions (/q) answered off the main thread, upgradeable into real child sessions, with a tree pane and a per-project session map.",
+      "author": {
+        "name": "ayii"
+      },
+      "category": "productivity",
+      "source": "./"
+    }
+  ]
+}
