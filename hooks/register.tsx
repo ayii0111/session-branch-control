@@ -1148,7 +1148,7 @@ const refreshNames = async ($: Api, g: Graph, cur: string) => {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'q', description: '開輕分支：針對目前 session 追問概念或「如果改成…會怎樣」（答案只進閱讀區，不進主線）', argumentHint: '[問題]' })
+    await $.command.register({ name: 'q', description: '開輕分支：針對目前 session 追問概念或「如果改成…會怎樣」（答案只進閱讀區，不進主線；對話進行中也能立即送出）', argumentHint: '[問題]', immediate: true })
     await $.command.register({ name: 'qf', description: '接著選中（或最後看過）的輕分支追問，帶著那條支線的問答', argumentHint: '[問題]' })
     await $.command.register({ name: 'tree', description: '打開脈絡樹面板並聚焦' })
     await $.command.register({ name: 't', description: '快速開合脈絡樹面板（對話進行中也能用）', immediate: true })
