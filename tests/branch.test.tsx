@@ -74,6 +74,10 @@ test('/q opens a branch, its answer lands in the full-width reader, merge writes
   expect(text).toContain('side-branch')
   expect(text).toContain('ANSWER-1')
   expect(text).toContain('ANSWER-2')
+  // merged: the button says so, and pressing it again sends nothing more
+  expect((await reader.find({ key: 'merge' }))?.text).toContain('✓ 已併回')
+  await reader.press({ key: 'merge' })
+  expect(session.appended().length).toBe(1)
 
   // the sidebar is only the outline now: no answer drawn there
   const pane = await $.ui.mount(PANE)
@@ -433,7 +437,11 @@ test('light branches list newest first and mark the one last read; ↳ primes a 
   const placed: string[] = []
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.close', () => ({ value: undefined }))
+  let closes = 0
+  on('ui.close', () => {
+    closes++
+    return { value: undefined }
+  })
   on('ui.place', (_, e) => {
     placed.push(e.id)
     return { value: { isPlaced: true, requestId: `req-${e.id}` } }
@@ -476,9 +484,14 @@ test('light branches list newest first and mark the one last read; ↳ primes a 
   expect(new Set(placed).size).toBe(2)
   // read the older one: its own row is asked for again (the engine answers
   // the row that stands), never a new row; it is marked
+  const closed = closes
   await pane.press({ key: rows[1]!.key! })
   expect(placed.length).toBe(3)
   expect(placed[2]).toBe(placed[0])
+  // the tree stays on the first press; the same row again folds it
+  expect(closes).toBe(closed)
+  await pane.press({ key: rows[1]!.key! })
+  expect(closes).toBe(closed + 1)
   await pane.unmount()
   pane = await $.ui.mount(PANE)
   rows = await branchRows()

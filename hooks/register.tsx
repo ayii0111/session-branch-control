@@ -76,7 +76,11 @@ const storeKey = (sessionId: string) => `tree:${sessionId}`
 /** the person's last choice, kept across sessions: start collapsed or not */
 const COLLAPSED_KEY = 'pref:collapsed'
 
+/** the light branch last pressed in the tree since it opened: pressed again, the tree folds */
+let treePicked: string | null = null
+
 const openPane = async ($: Api, focus = false) => {
+  treePicked = null
   const r = await $.ui.open(focus ? { id: PANE, title: TITLE, focus: true } : { id: PANE, title: TITLE })
   await update($, openAtom, () => r.isPlaced)
   await $.store.set(COLLAPSED_KEY, false)
@@ -482,17 +486,22 @@ const toggleReader = async ($: Api) => {
 const mergeBack = async ($: Api, id: string) => {
   const chain = chainOf(await read($, nodesAtom), id).filter(n => n.status === 'done')
   if (chain.length === 0) return
+  // what the main thread already has is not sent again: only the turns not merged yet
+  const fresh = chain.filter(n => !n.merged)
+  if (fresh.length === 0) {
+    $.ui.toast('這條支線已經併回主線過了，不用再併')
+    return
+  }
   let hidden: string | null
   try {
     // a hidden user row at the end: the main agent reads it next turn,
     // no turn is started and nothing already sent changes (cache kept)
-    hidden = await appendRecord($, toRecord(chain, 'merge'))
+    hidden = await appendRecord($, toRecord(fresh, 'merge'))
   } catch (err) {
     $.ui.toast(`併回失敗：${String((err as Error)?.message ?? err)}`)
     return
   }
-  const fresh = chain.filter(n => !n.merged)
-  await update($, nodesAtom, list => list.map(n => (chain.some(c => c.id === n.id) ? { ...n, merged: true } : n)))
+  await update($, nodesAtom, list => list.map(n => (fresh.some(c => c.id === n.id) ? { ...n, merged: true } : n)))
   await persist($)
   // and as visible turns in the transcript file, after the turns they were asked in
   const cur = await $.session.id()
@@ -500,8 +509,8 @@ const mergeBack = async ($: Api, id: string) => {
   if (job) await keepSplice($, cur, job)
   $.ui.toast(
     job
-      ? `已把 ${chain.length} 段支線問答併回主線：主線下一輪就會讀到，重新載入後會顯示在當時提問的位置`
-      : `已把 ${chain.length} 段支線問答併回主線，主線下一輪就會讀到（沒能寫進紀錄檔，重新載入後不會顯示）`,
+      ? `已把 ${fresh.length} 段支線問答併回主線：主線下一輪就會讀到，重新載入後會顯示在當時提問的位置`
+      : `已把 ${fresh.length} 段支線問答併回主線，主線下一輪就會讀到（沒能寫進紀錄檔，重新載入後不會顯示）`,
   )
 }
 
@@ -1291,8 +1300,18 @@ export const register: Register = on => {
     const label = `${icon(node)} ${node.kind === 'q' ? '追問' : '假設'}：${node.text}`
     const fold = () => foldReader($ as unknown as Api, node.id)
     // the branch's actions; `sfx` keys the floating copy apart from the row's own
+    // every answered turn on its chain is in the main thread already: nothing left to merge
+    const allMerged = chainOf(nodes, node.id).filter(n => n.status === 'done').every(n => n.merged)
+    const mergeButton = (sfx: string) =>
+      node.status === 'done' && allMerged ? (
+        <Button key={`merge${sfx}`} onPress={() => void mergeBack($ as unknown as Api, node.id)}>
+          <Text dimColor>✓ 已併回</Text>
+        </Button>
+      ) : (
+        doubtful(`merge${sfx}`, '併回主線', () => void mergeBack($ as unknown as Api, node.id))
+      )
     const actions = (sfx = '') => [
-      ...(node.inherited ? [] : [doubtful(`merge${sfx}`, '併回主線', () => void mergeBack($ as unknown as Api, node.id))]),
+      ...(node.inherited ? [] : [mergeButton(sfx)]),
       doubtful(`up-here${sfx}`, '⇪ 升級：原地', () => void upgradeNode($ as unknown as Api, node.id, 'here')),
       doubtful(`up-tab${sfx}`, '⇪ 升級：新分頁', () => void upgradeNode($ as unknown as Api, node.id, 'tab')),
       doubtful(`follow${sfx}`, '↳ 接著追問', () => void followUp($ as unknown as Api, node.id)),
@@ -1701,11 +1720,17 @@ export const register: Register = on => {
     // the sidebar is the outline: a pick opens the branch in the full-width reader
     // ...and folds the sidebar away (the person's open/closed preference kept),
     // first, so the reader is scrolled to in the transcript's final width
+    // first press: select and jump, the tree stays; the same row pressed again folds the tree
     const select = (id: string) => () =>
       (async () => {
+        if (treePicked === id) {
+          treePicked = null
+          await $.ui.close({ id: PANE })
+          await update($, openAtom, () => false)
+          return
+        }
+        treePicked = id
         await update($, selectedAtom, () => id)
-        await $.ui.close({ id: PANE })
-        await update($, openAtom, () => false)
         await openReader($ as unknown as Api, id, 'jump')
       })()
     const readerButton = (key: string) => (
