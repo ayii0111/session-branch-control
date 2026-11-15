@@ -69,7 +69,7 @@ const rowOf = (nodeId: string) => `${ROW_PREFIX}${nodeId}`
 const readerAtom = atom({ plugin: 'session-branch-control', key: 'reader' } as const, READER0)
 /** the reader's floating bar waits for the scroll to settle: the position (row + viewport) it may show at */
 const floatReadyAtom = atom({ plugin: 'session-branch-control', key: 'floatReady' } as const, null as string | null)
-const FLOAT_DELAY_MS = 500
+const FLOAT_DELAY_MS = 1000
 let floatPending: string | null = null
 
 const storeKey = (sessionId: string) => `tree:${sessionId}`
