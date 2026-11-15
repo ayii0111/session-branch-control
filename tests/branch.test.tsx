@@ -93,6 +93,9 @@ test('/q opens a branch, its answer lands in the full-width reader, merge writes
     surface: 'terminal',
     props: { id: row, plugin: 'session-branch-control', onScreen: { first: 0, last: 10, of: 40 } },
   })
+  // not at once: only after the viewport stays put a moment
+  expect(await cutOff.find({ key: 'follow-float' })).toBeUndefined()
+  await clock.advance(600)
   expect(await cutOff.find({ key: 'follow-float' })).toBeDefined()
   expect(await cutOff.find({ key: 'fold-float' })).toBeDefined()
   expect(await cutOff.find({ key: 'back-float' })).toBeUndefined()

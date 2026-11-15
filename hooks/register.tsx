@@ -67,6 +67,10 @@ const READER0: Reader = { node: null, rows: {}, open: [], back: null }
 const ROW_PREFIX = 'reader-'
 const rowOf = (nodeId: string) => `${ROW_PREFIX}${nodeId}`
 const readerAtom = atom({ plugin: 'session-branch-control', key: 'reader' } as const, READER0)
+/** the reader's floating bar waits for the scroll to settle: the position (row + viewport) it may show at */
+const floatReadyAtom = atom({ plugin: 'session-branch-control', key: 'floatReady' } as const, null as string | null)
+const FLOAT_DELAY_MS = 500
+let floatPending: string | null = null
 
 const storeKey = (sessionId: string) => `tree:${sessionId}`
 /** the person's last choice, kept across sessions: start collapsed or not */
@@ -1318,7 +1322,18 @@ export const register: Register = on => {
     // the row's own actions (third row from its end: then the border, then 收合)
     // are below the viewport's bottom: float them with 收合 on the second-to-last
     // row showing (the last holds the engine's own button)
-    const floatAt = vis && vis.last >= 2 && vis.last < vis.of - 3 ? vis.last - 1 : null
+    const wantFloat = vis && vis.last >= 2 && vis.last < vis.of - 3 ? vis.last - 1 : null
+    // shown only once the viewport has stayed put a moment: while scrolling it would jump about
+    const floatKey = vis ? `${node.id}:${vis.first}:${vis.last}:${vis.of}` : null
+    const floatAt = wantFloat !== null && (await read($, floatReadyAtom)) === floatKey ? wantFloat : null
+    if (wantFloat !== null && floatAt === null && floatPending !== floatKey) {
+      floatPending = floatKey
+      $.clock.after(FLOAT_DELAY_MS, () => {
+        if (floatPending !== floatKey) return
+        floatPending = null
+        void update($, floatReadyAtom, () => floatKey)
+      })
+    }
     const status =
       node.status === 'pending' ? ' · 回答中…' : node.status === 'error' ? ' · ✗ 失敗' : ''
     const marks = `${node.inherited ? ' · ⇣ 從上層 session 升級帶來，已寫進這個 session 的歷史' : node.merged ? ' · ⤴ 已併回主線' : ''}${node.upgradedTo ? ' · ⇪ 已升級成重支線' : ''}`

@@ -99,6 +99,7 @@ declare module 'claude-code' {
       mapSelected: string | null
       lightCollapsed: boolean
       reader: Reader
+      floatReady: string | null
       recent: string | null
       names: Shaped<Record<string, string>>
       confirm: Shaped<{ id: string; name: string } | null>
