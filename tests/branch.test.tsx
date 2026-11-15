@@ -472,7 +472,7 @@ test('light branches list newest first and mark the one last read; ↳ primes a 
     props: { id: row, plugin: 'session-branch-control' },
   })
   await reader.press({ key: 'follow' })
-  expect(filled).toEqual(['/qf '])
+  expect(filled).toEqual(['/qf #2.1 '])
   // delete: gone from the tree, the mark and the reader
   await reader.press({ key: 'del' })
   await reader.unmount()

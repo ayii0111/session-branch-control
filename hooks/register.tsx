@@ -587,8 +587,12 @@ const removeNode = async ($: Api, id: string) => {
 /** ↳ follow up on `id`: it becomes /qf's target, the prompt is primed */
 const followUp = async ($: Api, id: string) => {
   await update($, selectedAtom, () => id)
-  const filled = await $.prompt.fill({ text: '/qf ' }).catch(() => undefined)
-  if (!filled?.isFilled) $.ui.toast('已選中這個節點：輸入 /qf <問題> 接著追問')
+  // its tag written in: the target stays put whatever is selected before sending
+  const nodes = await read($, nodesAtom)
+  const node = nodes.find(n => n.id === id)
+  const text = node ? `/qf ${tagOf(nodes, node)} ` : '/qf '
+  const filled = await $.prompt.fill({ text }).catch(() => undefined)
+  if (!filled?.isFilled) $.ui.toast(`已選中這個節點：輸入 ${text}<問題> 接著追問`)
 }
 
 /** the branch /qf follows up on: the selected one, else the one last read */
