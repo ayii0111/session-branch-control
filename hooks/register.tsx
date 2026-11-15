@@ -1387,11 +1387,11 @@ export const register: Register = on => {
           <Button key="fold2" plain label="[▴ 收合]" onPress={fold} />
         </Box>
         {floatAt !== null && (
-          // two rows over the answer: the bar (actions left, 收合 right; no shade,
-          // it jumps too much while scrolling), and the last row blanked so no
-          // text shows through beneath it
+          // two rows over the answer: the bar on a shade of its own (actions left,
+          // 收合 right; it waits for the scroll to settle, so the shade no longer
+          // jumps about), and the last row blanked so no text shows through beneath it
           <Box position="absolute" top={floatAt} left={0} right={0} flexDirection="column">
-            <Box justifyContent="space-between" gap={1}>
+            <Box backgroundColor="subtle" justifyContent="space-between" gap={1}>
               <Box gap={1} flexShrink={0}>
                 {actions('-float')}
               </Box>
