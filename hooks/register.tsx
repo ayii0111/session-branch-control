@@ -1271,7 +1271,6 @@ export const register: Register = on => {
     // a deleted branch's row (or an older version's) draws nothing
     if (!node) return next(e)
     const r = await read($, readerAtom)
-    const focused = r.node === node.id
     const rewound = (await read($, rewoundAtom)).includes(node.id)
     const { Box, Text, Button, Markdown } = $.ui.resolve(e)
     // an action that hands the answer on to a conversation that no longer has its
@@ -1287,8 +1286,14 @@ export const register: Register = on => {
     const icon = (n: BranchNode) => (n.kind === 'q' ? '?' : '⑂')
     const label = `${icon(node)} ${node.kind === 'q' ? '追問' : '假設'}：${node.text}`
     const fold = () => foldReader($ as unknown as Api, node.id)
-    const back = () => goBack($ as unknown as Api)
-    const showBack = focused && r.back !== null
+    // the branch's actions; `sfx` keys the floating copy apart from the row's own
+    const actions = (sfx = '') => [
+      ...(node.inherited ? [] : [doubtful(`merge${sfx}`, '併回主線', () => void mergeBack($ as unknown as Api, node.id))]),
+      doubtful(`up-here${sfx}`, '⇪ 升級：原地', () => void upgradeNode($ as unknown as Api, node.id, 'here')),
+      doubtful(`up-tab${sfx}`, '⇪ 升級：新分頁', () => void upgradeNode($ as unknown as Api, node.id, 'tab')),
+      doubtful(`follow${sfx}`, '↳ 接著追問', () => void followUp($ as unknown as Api, node.id)),
+      <Button key={`del${sfx}`} label="刪除" onPress={() => removeNode($ as unknown as Api, node.id)} />,
+    ]
     // another branch from inside this row: its own row, wherever it stands
     const show = (id: string) => () =>
       (async () => {
@@ -1310,9 +1315,10 @@ export const register: Register = on => {
     const chain = chainOf(nodes, node.id)
     const kids = nodes.filter(n => n.parentId === node.id)
     const vis = e.props.onScreen
-    // the row's end is cut off by the viewport's bottom: float the controls
-    // on the second-to-last row showing (the last holds the engine's own button)
-    const floatAt = vis && vis.last >= 2 && vis.last < vis.of - 1 ? vis.last - 1 : null
+    // the row's own actions (third row from its end: then the border, then 收合)
+    // are below the viewport's bottom: float them with 收合 on the second-to-last
+    // row showing (the last holds the engine's own button)
+    const floatAt = vis && vis.last >= 2 && vis.last < vis.of - 3 ? vis.last - 1 : null
     const status =
       node.status === 'pending' ? ' · 回答中…' : node.status === 'error' ? ' · ✗ 失敗' : ''
     const marks = `${node.inherited ? ' · ⇣ 從上層 session 升級帶來，已寫進這個 session 的歷史' : node.merged ? ' · ⤴ 已併回主線' : ''}${node.upgradedTo ? ' · ⇪ 已升級成重支線' : ''}`
@@ -1321,7 +1327,6 @@ export const register: Register = on => {
       <Box flexDirection="column">
         <Box gap={1}>
           <Button key="fold" plain label="[▴ 收合]" onPress={fold} />
-          {showBack && <Button key="back" plain label="[↩ 回原處]" onPress={back} />}
           <Text dimColor>{`📖 支線閱讀區 #${node.turn} · /r 開合`}</Text>
         </Box>
         <Box flexDirection="column" borderStyle="round" borderDimColor paddingX={1}>
@@ -1360,21 +1365,22 @@ export const register: Register = on => {
             </Box>
           )}
           <Box flexWrap="wrap" gap={1} marginTop={1}>
-            {!node.inherited && doubtful('merge', '併回主線', () => void mergeBack($ as unknown as Api, node.id))}
-            {doubtful('up-here', '⇪ 升級：原地', () => void upgradeNode($ as unknown as Api, node.id, 'here'))}
-            {doubtful('up-tab', '⇪ 升級：新分頁', () => void upgradeNode($ as unknown as Api, node.id, 'tab'))}
-            {doubtful('follow', '↳ 接著追問', () => void followUp($ as unknown as Api, node.id))}
-            <Button key="del" label="刪除" onPress={() => removeNode($ as unknown as Api, node.id)} />
+            {actions()}
           </Box>
         </Box>
         <Box gap={1}>
           <Button key="fold2" plain label="[▴ 收合]" onPress={fold} />
-          {showBack && <Button key="back2" plain label="[↩ 回原處]" onPress={back} />}
         </Box>
         {floatAt !== null && (
-          <Box position="absolute" top={floatAt} right={0} gap={1}>
-            {showBack && <Button key="back-float" plain label="[↩ 回原處]" onPress={back} />}
-            <Button key="fold-float" plain label="[▴ 收合]" onPress={fold} />
+          // the whole row: actions left, 收合 right, spaces between painting over the answer beneath
+          <Box position="absolute" top={floatAt} left={0} right={0}>
+            <Box gap={1} flexShrink={0}>
+              {actions('-float')}
+            </Box>
+            <Text wrap="truncate-end">{' '.repeat(400)}</Text>
+            <Box flexShrink={0}>
+              <Button key="fold-float" plain label="[▴ 收合]" onPress={fold} />
+            </Box>
           </Box>
         )}
       </Box>

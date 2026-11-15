@@ -85,6 +85,27 @@ test('/q opens a branch, its answer lands in the full-width reader, merge writes
   expect((await reader.find({ type: 'Text', text: /📖/ }))?.text).toBe('📖 #7')
   await pane.press({ key: 'reader' })
   expect((await reader.find({ type: 'Text', text: /若改用 OT/ }))?.text).toContain('若改用 OT')
+  // its bottom below the viewport: the actions float along with 收合; scrolled to the end, they don't
+  const cutOff = await $.ui.mount({
+    plugin: 'session-branch-control',
+    component: 'Placed',
+    requestId: `req-${row}-cut`,
+    surface: 'terminal',
+    props: { id: row, plugin: 'session-branch-control', onScreen: { first: 0, last: 10, of: 40 } },
+  })
+  expect(await cutOff.find({ key: 'follow-float' })).toBeDefined()
+  expect(await cutOff.find({ key: 'fold-float' })).toBeDefined()
+  expect(await cutOff.find({ key: 'back-float' })).toBeUndefined()
+  await cutOff.unmount()
+  const atEnd = await $.ui.mount({
+    plugin: 'session-branch-control',
+    component: 'Placed',
+    requestId: `req-${row}-end`,
+    surface: 'terminal',
+    props: { id: row, plugin: 'session-branch-control', onScreen: { first: 20, last: 39, of: 40 } },
+  })
+  expect(await atEnd.find({ key: 'follow-float' })).toBeUndefined()
+  await atEnd.unmount()
   await pane.unmount()
   await reader.unmount()
 })
