@@ -1298,6 +1298,17 @@ export const register: Register = on => {
       doubtful(`follow${sfx}`, '↳ 接著追問', () => void followUp($ as unknown as Api, node.id)),
       <Button key={`del${sfx}`} label="刪除" onPress={() => removeNode($ as unknown as Api, node.id)} />,
     ]
+    // one look for the row's own bar and the floating copy: a shade, actions left, 收合 right
+    const bar = (sfx = '') => (
+      <Box backgroundColor="subtle" justifyContent="space-between" gap={1} flexGrow={1}>
+        <Box gap={1} flexShrink={0}>
+          {actions(sfx)}
+        </Box>
+        <Box flexShrink={0}>
+          <Button key={`fold${sfx || '2'}`} plain label="[▴ 收合]" onPress={fold} />
+        </Box>
+      </Box>
+    )
     // another branch from inside this row: its own row, wherever it stands
     const show = (id: string) => () =>
       (async () => {
@@ -1319,10 +1330,10 @@ export const register: Register = on => {
     const chain = chainOf(nodes, node.id)
     const kids = nodes.filter(n => n.parentId === node.id)
     const vis = e.props.onScreen
-    // the row's own actions (third row from its end: then the border, then 收合)
-    // are below the viewport's bottom: float them with 收合 on the second-to-last
-    // row showing (the last holds the engine's own button)
-    const floatAt = vis && vis.last >= 2 && vis.last < vis.of - 3 ? vis.last - 1 : null
+    // the row's own bar (second row from its end, then the border) is below the
+    // viewport's bottom: float a copy on the second-to-last row showing (the
+    // last holds the engine's own button)
+    const floatAt = vis && vis.last >= 2 && vis.last < vis.of - 2 ? vis.last - 1 : null
     // the bar shows only once the viewport has stayed put a moment: while scrolling it would jump about
     const floatKey = vis ? `${node.id}:${vis.first}:${vis.last}:${vis.of}` : null
     const floatReady = floatAt !== null && (await read($, floatReadyAtom)) === floatKey
@@ -1379,12 +1390,7 @@ export const register: Register = on => {
               </Text>
             </Box>
           )}
-          <Box flexWrap="wrap" gap={1} marginTop={1}>
-            {actions()}
-          </Box>
-        </Box>
-        <Box gap={1}>
-          <Button key="fold2" plain label="[▴ 收合]" onPress={fold} />
+          <Box marginTop={1}>{bar()}</Box>
         </Box>
         {floatAt !== null && (
           // two rows over the answer, blank at once so no text shows through; the
@@ -1392,14 +1398,7 @@ export const register: Register = on => {
           // only once the scroll has settled, so it does not jump about
           <Box position="absolute" top={floatAt} left={0} right={0} flexDirection="column">
             {floatReady ? (
-              <Box backgroundColor="subtle" justifyContent="space-between" gap={1}>
-                <Box gap={1} flexShrink={0}>
-                  {actions('-float')}
-                </Box>
-                <Box flexShrink={0}>
-                  <Button key="fold-float" plain label="[▴ 收合]" onPress={fold} />
-                </Box>
-              </Box>
+              bar('-float')
             ) : (
               <Text wrap="truncate-end">{' '.repeat(400)}</Text>
             )}
