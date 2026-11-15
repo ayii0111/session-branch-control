@@ -1706,8 +1706,9 @@ export const register: Register = on => {
     const dock = e.props.placement === 'dock'
     const { offset, bodyRows } = e.props.scroll
     const footerTop = offset + Math.max(1, bodyRows) - 1
+    // never shrunk: beside it the row of spaces gives way, not the buttons
     const footer = (
-      <Box gap={1}>
+      <Box gap={1} flexShrink={0}>
         <Button key="collapse" label="⇥ 收合" hotkey="x" onPress={() => void closePane($ as unknown as Api)} />
         {nodes.length > 0 && readerButton('reader')}
       </Box>
