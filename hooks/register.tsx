@@ -599,6 +599,44 @@ const followTarget = async ($: Api) => {
   return [sel, recent].find(id => id && nodes.some(n => n.id === id)) ?? null
 }
 
+/** a branch's tag for /qf: `#turn`, or `#turn.k` when several were asked after the same prompt */
+const tagOf = (nodes: BranchNode[], node: BranchNode) => {
+  const same = nodes.filter(n => n.turn === node.turn)
+  return same.length > 1 ? `#${node.turn}.${same.indexOf(node) + 1}` : `#${node.turn}`
+}
+
+/** `/qf #7 …` or `/qf #7.2 …`: the branch it names (a bare `#7` shared by several: the newest), and the question left */
+const parseTag = (nodes: BranchNode[], args: string) => {
+  const m = /^#(\d+)(?:\.(\d+))?(?=\s|$)\s*/.exec(args)
+  if (!m) return undefined
+  const same = nodes.filter(n => n.turn === Number(m[1]))
+  const node = m[2] ? same[Number(m[2]) - 1] : same.at(-1)
+  return { tag: m[0].trim(), node, rest: args.slice(m[0].length).trim() }
+}
+
+/** the status line while the box holds `/qf`: which branch it would follow */
+let qfHint = false
+const hintQf = async ($: Api, text: string) => {
+  const m = /^\/qf(?:\s+(.*))?$/s.exec(text.trimStart())
+  if (!m) {
+    if (qfHint) $.ui.status(undefined)
+    qfHint = false
+    return
+  }
+  const nodes = await read($, nodesAtom)
+  const named = parseTag(nodes, m[1] ?? '')
+  const id = named ? named.node?.id : await followTarget($)
+  const node = id ? nodes.find(n => n.id === id) : undefined
+  qfHint = true
+  $.ui.status(
+    node
+      ? `↳ /qf 會接在 ${tagOf(nodes, node)}「${cut(node.text, 30)}」底下${named ? '' : '（輸入 #編號 可改接其他支線）'}`
+      : named
+        ? `↳ 找不到 ${named.tag} 這條支線`
+        : '↳ 沒有可以接著追問的輕分支：先用 /q 開一條',
+  )
+}
+
 /** `parentId` null: a question on the session itself (/q); else a follow-up under that branch (/qf) */
 const ask = async ($: Api, kind: BranchKind, text: string, parentId: string | null) => {
   const nodes = await read($, nodesAtom)
@@ -1149,7 +1187,7 @@ const refreshNames = async ($: Api, g: Graph, cur: string) => {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'q', description: '開輕分支：針對目前 session 追問概念或「如果改成…會怎樣」（答案只進閱讀區，不進主線；對話進行中也能立即送出）', argumentHint: '[問題]', immediate: true })
-    await $.command.register({ name: 'qf', description: '接著選中（或最後看過）的輕分支追問，帶著那條支線的問答（對話進行中也能立即送出）', argumentHint: '[問題]', immediate: true })
+    await $.command.register({ name: 'qf', description: '接著輕分支追問：#編號 指定支線，不給就接選中（或最後看過）的那條，帶著那條支線的問答（對話進行中也能立即送出）', argumentHint: '[#編號] [問題]', immediate: true })
     await $.command.register({ name: 'tree', description: '打開脈絡樹面板並聚焦（對話進行中也能用）', immediate: true })
     await $.command.register({ name: 't', description: '快速開合脈絡樹面板（對話進行中也能用）', immediate: true })
     await $.command.register({ name: 'r', description: '開合支線閱讀區（全寬顯示選中支線的問答；收合時捲回原處）', immediate: true })
@@ -1428,16 +1466,45 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'qf' }, async ($, e) => {
-    const text = e.args.trim()
-    if (!text) return { text: '用法：/qf <問題>：接著選中（或最後看過）的輕分支追問' }
-    const target = await followTarget($)
+    const usage = '用法：/qf [#編號] <問題>：接著指定（或選中、最後看過）的輕分支追問'
+    const nodes = await read($, nodesAtom)
+    const named = parseTag(nodes, e.args.trim())
+    if (named && !named.node) return { text: `找不到 ${named.tag} 這條支線：編號是脈絡樹上每條支線後面的 #n` }
+    const text = named ? named.rest : e.args.trim()
+    if (!text) return { text: usage }
+    const target = named ? named.node!.id : await followTarget($)
     if (!target) return { text: '沒有可以接著追問的輕分支：先用 /q 開一條，或在側欄點選一條' }
-    const parent = (await read($, nodesAtom)).find(n => n.id === target)
+    const parent = nodes.find(n => n.id === target)
     const rewound = (await read($, rewoundAtom)).includes(target)
     await ask($, 'q', text, target)
+    const tag = parent ? tagOf(nodes, parent) : ''
+    $.ui.toast(`↳ 接在 ${tag}「${cut(parent?.text ?? '', 30)}」底下`)
     return {
-      text: `接著「${(parent?.text ?? '').slice(0, 30)}」追問，答案會出現在下方的 📖 閱讀區${rewound ? '\n⚠ 這條支線的脈絡已被 rewind 退回：主線看不到它當初依據的對話，回答可能接不上' : ''}`,
+      text: `接著 ${tag}「${(parent?.text ?? '').slice(0, 30)}」追問，答案會出現在下方的 📖 閱讀區${rewound ? '\n⚠ 這條支線的脈絡已被 rewind 退回：主線看不到它當初依據的對話，回答可能接不上' : ''}`,
     }
+  })
+
+  // while the box holds /qf: say which branch it would follow
+  on('prompt.edit', async ($, e, next) => {
+    const r = await next(e)
+    await hintQf($ as unknown as Api, r.text)
+    return r
+  })
+  on('prompt.change', async ($, e, next) => {
+    await hintQf($ as unknown as Api, e.text)
+    return next(e)
+  })
+
+  // `/qf #`: offer every light branch by its tag
+  on('prompt.autocomplete', { token: /^#\d*(\.\d*)?$/ }, async ($, e, next) => {
+    const r = await next(e)
+    if (!/^\/qf\s+$/.test(e.text.slice(0, e.start))) return r
+    const nodes = await read($, nodesAtom)
+    const rows = [...nodes]
+      .reverse()
+      .map(n => ({ text: `${tagOf(nodes, n)} `, label: tagOf(nodes, n), description: n.text }))
+      .filter(s => s.label.startsWith(e.token))
+    return { suggestions: [...r.suggestions, ...rows] }
   })
 
   on('command.run', { command: 'tree' }, async $ => {
@@ -1692,7 +1759,7 @@ export const register: Register = on => {
             </Button>
             {rows.map(({ node, prefix }) => {
               const seenLast = node.id === recent
-              const tail = ` #${node.turn}${mark(node)}`
+              const tail = ` ${tagOf(nodes, node)}${mark(node)}`
               const back = rewound.includes(node.id) ? ' ↶' : ''
               const flag = seenLast ? ' ◂ 剛看過' : ''
               const room = cols - cells(INDENT) - cells(prefix) - cells(tail) - cells(back) - cells(flag)

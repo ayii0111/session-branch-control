@@ -89,6 +89,84 @@ test('/q opens a branch, its answer lands in the full-width reader, merge writes
   await reader.unmount()
 })
 
+test('/qf #n follows the branch it names; the status line says where a /qf would go; # completes tags', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.store(on)
+  mock.session(on)
+  const forks: string[] = []
+  const statuses: (string | undefined)[] = []
+  const toasts: string[] = []
+  let turn = 3
+
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.place', (_, e) => ({ value: { isPlaced: true, requestId: `req-${e.id}` } }))
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.status', (_, e) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('session.turns', () => ({ value: turn }))
+  on('prompt.change', (_, e) => ({ text: e.text }))
+  on('prompt.autocomplete', () => ({ suggestions: [] }))
+  on('model.fork', (_, e) => {
+    forks.push(e.prompt)
+    return {
+      value: {
+        isAnswered: true,
+        text: `ANSWER-${forks.length}`,
+        usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      },
+    }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'q', args: 'AAA' })
+  await clock.advance(10)
+  turn = 5
+  await $.command.run({ command: 'q', args: 'BBB' })
+  await clock.advance(10)
+
+  // the box holds /qf: the status line names the selected branch (the newest, #5)
+  await $.prompt.change({ text: '/qf ', cursor: 4, origin: { kind: 'fill' } } as never)
+  expect(statuses.at(-1)).toContain('#5「BBB」')
+  await $.prompt.change({ text: '/qf #3 x', cursor: 8, origin: { kind: 'fill' } } as never)
+  expect(statuses.at(-1)).toContain('#3「AAA」')
+  await $.prompt.change({ text: '/qf #9 x', cursor: 8, origin: { kind: 'fill' } } as never)
+  expect(statuses.at(-1)).toContain('找不到 #9')
+  // not /qf any more: the line goes away
+  await $.prompt.change({ text: 'hello', cursor: 5, origin: { kind: 'fill' } } as never)
+  expect(statuses.at(-1)).toBeUndefined()
+
+  // `/qf #` offers both tags, newest first
+  const { suggestions } = await $.prompt.autocomplete({ text: '/qf #', cursor: 5, token: '#', start: 4 })
+  expect(suggestions.map(s => s.label)).toEqual(['#5', '#3'])
+
+  // /qf #3 follows AAA though BBB is selected, and says so
+  await $.command.run({ command: 'qf', args: '#3 接著 A' })
+  await clock.advance(10)
+  expect(forks.at(-1)).toContain('AAA')
+  expect(forks.at(-1)).not.toContain('BBB')
+  expect(toasts).toContain('↳ 接在 #3「AAA」底下')
+  // several asked after the same prompt: #n.k tells them apart
+  await $.command.run({ command: 'q', args: 'CCC' })
+  await clock.advance(10)
+  const again = await $.prompt.autocomplete({ text: '/qf #5', cursor: 6, token: '#5', start: 4 })
+  expect(again.suggestions.map(s => s.label)).toEqual(['#5.3', '#5.2', '#5.1'])
+  await $.command.run({ command: 'qf', args: '#5.1 接著 B' })
+  await clock.advance(10)
+  expect(forks.at(-1)).toContain('BBB')
+  expect(forks.at(-1)).not.toContain('CCC')
+
+  const missing = await $.command.run({ command: 'qf', args: '#9 x' })
+  expect(JSON.stringify(missing)).toContain('找不到 #9')
+})
+
 test('/t collapses to a mini bar above the prompt and expands again', async ($, on) => {
   mock.clock(on)
   mock.store(on)
