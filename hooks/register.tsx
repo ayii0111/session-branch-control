@@ -1372,15 +1372,18 @@ export const register: Register = on => {
           <Button key="fold2" plain label="[▴ 收合]" onPress={fold} />
         </Box>
         {floatAt !== null && (
-          // the whole row: actions left, 收合 right, spaces between painting over the answer beneath
-          <Box position="absolute" top={floatAt} left={0} right={0}>
-            <Box gap={1} flexShrink={0}>
-              {actions('-float')}
+          // two rows over the answer: the bar on a shade of its own (actions left,
+          // 收合 right), and the last row blanked so no text shows through beneath it
+          <Box position="absolute" top={floatAt} left={0} right={0} flexDirection="column">
+            <Box backgroundColor="subtle" justifyContent="space-between" gap={1}>
+              <Box gap={1} flexShrink={0}>
+                {actions('-float')}
+              </Box>
+              <Box flexShrink={0}>
+                <Button key="fold-float" plain label="[▴ 收合]" onPress={fold} />
+              </Box>
             </Box>
             <Text wrap="truncate-end">{' '.repeat(400)}</Text>
-            <Box flexShrink={0}>
-              <Button key="fold-float" plain label="[▴ 收合]" onPress={fold} />
-            </Box>
           </Box>
         )}
       </Box>
