@@ -69,7 +69,7 @@ const rowOf = (nodeId: string) => `${ROW_PREFIX}${nodeId}`
 const readerAtom = atom({ plugin: 'session-branch-control', key: 'reader' } as const, READER0)
 /** the reader's floating bar waits for the scroll to settle: the position (row + viewport) it may show at */
 const floatReadyAtom = atom({ plugin: 'session-branch-control', key: 'floatReady' } as const, null as string | null)
-const FLOAT_DELAY_MS = 1000
+const FLOAT_DELAY_MS = 500
 let floatPending: string | null = null
 
 const storeKey = (sessionId: string) => `tree:${sessionId}`
@@ -1322,11 +1322,11 @@ export const register: Register = on => {
     // the row's own actions (third row from its end: then the border, then 收合)
     // are below the viewport's bottom: float them with 收合 on the second-to-last
     // row showing (the last holds the engine's own button)
-    const wantFloat = vis && vis.last >= 2 && vis.last < vis.of - 3 ? vis.last - 1 : null
-    // shown only once the viewport has stayed put a moment: while scrolling it would jump about
+    const floatAt = vis && vis.last >= 2 && vis.last < vis.of - 3 ? vis.last - 1 : null
+    // the bar shows only once the viewport has stayed put a moment: while scrolling it would jump about
     const floatKey = vis ? `${node.id}:${vis.first}:${vis.last}:${vis.of}` : null
-    const floatAt = wantFloat !== null && (await read($, floatReadyAtom)) === floatKey ? wantFloat : null
-    if (wantFloat !== null && floatAt === null && floatPending !== floatKey) {
+    const floatReady = floatAt !== null && (await read($, floatReadyAtom)) === floatKey
+    if (floatAt !== null && !floatReady && floatPending !== floatKey) {
       floatPending = floatKey
       $.clock.after(FLOAT_DELAY_MS, () => {
         if (floatPending !== floatKey) return
@@ -1387,18 +1387,22 @@ export const register: Register = on => {
           <Button key="fold2" plain label="[▴ 收合]" onPress={fold} />
         </Box>
         {floatAt !== null && (
-          // two rows over the answer: the bar on a shade of its own (actions left,
-          // 收合 right; it waits for the scroll to settle, so the shade no longer
-          // jumps about), and the last row blanked so no text shows through beneath it
+          // two rows over the answer, blank at once so no text shows through; the
+          // bar (on a shade of its own: actions left, 收合 right) fills the first
+          // only once the scroll has settled, so it does not jump about
           <Box position="absolute" top={floatAt} left={0} right={0} flexDirection="column">
-            <Box backgroundColor="subtle" justifyContent="space-between" gap={1}>
-              <Box gap={1} flexShrink={0}>
-                {actions('-float')}
+            {floatReady ? (
+              <Box backgroundColor="subtle" justifyContent="space-between" gap={1}>
+                <Box gap={1} flexShrink={0}>
+                  {actions('-float')}
+                </Box>
+                <Box flexShrink={0}>
+                  <Button key="fold-float" plain label="[▴ 收合]" onPress={fold} />
+                </Box>
               </Box>
-              <Box flexShrink={0}>
-                <Button key="fold-float" plain label="[▴ 收合]" onPress={fold} />
-              </Box>
-            </Box>
+            ) : (
+              <Text wrap="truncate-end">{' '.repeat(400)}</Text>
+            )}
             <Text wrap="truncate-end">{' '.repeat(400)}</Text>
           </Box>
         )}

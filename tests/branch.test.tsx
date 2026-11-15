@@ -95,7 +95,7 @@ test('/q opens a branch, its answer lands in the full-width reader, merge writes
   })
   // not at once: only after the viewport stays put a moment
   expect(await cutOff.find({ key: 'follow-float' })).toBeUndefined()
-  await clock.advance(1100)
+  await clock.advance(600)
   expect(await cutOff.find({ key: 'follow-float' })).toBeDefined()
   expect(await cutOff.find({ key: 'fold-float' })).toBeDefined()
   expect(await cutOff.find({ key: 'back-float' })).toBeUndefined()
